@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "stream.hpp"
+#include "osc_compat.hpp"
 
 #include <bit>
 #include <string_view>
@@ -63,17 +64,6 @@ Packet vmcHand(const Hand& hand, std::size_t side) {
     return packet;
 }
 
-Packet oscHand(const Hand& hand, std::size_t side) {
-    auto packet = bundle();
-    for (std::size_t f = 0; f < fingers.size(); ++f) {
-        Packet message;
-        word(message, std::string("/opencap/") + (side ? "right/" : "left/") + fingers[f] + "/curl");
-        word(message, ",f");
-        scalar(message, hand.curl[f]);
-        append(packet, message);
-    }
-    return packet;
-}
 }
 
 struct Stream::Impl {
@@ -103,6 +93,8 @@ struct Stream::Impl {
     SOCKET socket{INVALID_SOCKET};
     sockaddr_in vmc{}, osc{};
     bool oscWasLive{};
+    Millis lastOscRefresh{};
+    std::array<std::array<unsigned, avatarParameterCount>, handCount> previousBits{};
 };
 
 Stream::Stream() : impl_(std::make_unique<Impl>()) {}
@@ -120,20 +112,39 @@ bool Stream::configure(const StreamSettings& settings) {
     endpoint.sin_port = htons(static_cast<u_short>(settings.oscPort));
     impl_->osc = endpoint;
     impl_->oscWasLive = false;
+    impl_->lastOscRefresh = 0;
     return true;
 }
 
 void Stream::send(const Snapshot& snapshot) {
     if (!impl_->vmc.sin_port && !impl_->osc.sin_port) return;
     bool active = false;
+    const bool refresh = !impl_->oscWasLive || snapshot.heartbeat - impl_->lastOscRefresh >= 1000;
     for (std::size_t i = 0; i < handCount; ++i) {
         const auto& hand = snapshot.hands[i];
         if (!hand.calibrated || !isLive(snapshot, static_cast<Side>(i), snapshot.heartbeat)) continue;
         active = true;
         if (impl_->vmc.sin_port) impl_->transmit(vmcHand(hand, i), impl_->vmc);
-        if (impl_->osc.sin_port) impl_->transmit(oscHand(hand, i), impl_->osc);
+        if (!impl_->osc.sin_port) continue;
+        const auto parameters = avatarParameters(snapshot, static_cast<Side>(i));
+        for (std::size_t control = 0; control < parameters.size(); ++control) {
+            const auto& parameter = parameters[control];
+            const auto previous = impl_->previousBits[i][control];
+            impl_->previousBits[i][control] = parameter.bits;
+            for (unsigned mask = 1; mask < 16; mask *= 2) {
+                if (!refresh && !((previous ^ parameter.bits) & mask)) continue;
+                Packet message;
+                word(message, std::string("/avatar/parameters/") + sides[i]
+                    + std::string(parameter.control) + std::to_string(mask));
+                word(message, parameter.bits & mask ? ",T" : ",F");
+                impl_->transmit(message, impl_->osc);
+            }
+        }
     }
-    if (impl_->osc.sin_port && impl_->oscWasLive != active) impl_->transmit(status(active), impl_->osc);
+    if (impl_->osc.sin_port && (impl_->oscWasLive != active || (active && refresh))) {
+        impl_->transmit(status(active), impl_->osc);
+        impl_->lastOscRefresh = snapshot.heartbeat;
+    }
     impl_->oscWasLive = active;
 }
 }

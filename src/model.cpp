@@ -64,6 +64,11 @@ Hand demoHand(Side side, Millis now) {
     hand.trigger = hand.curl[1];
     hand.grip = (hand.curl[2] + hand.curl[3]) / 2.0f;
     hand.pad = hand.curl[0];
+    constexpr std::array mainAngle{2, 6, 10, 14, 18};
+    for (std::size_t finger = 0; finger < mainAngle.size(); ++finger) {
+        hand.angles[mainAngle[finger]] = -hand.curl[finger] * 65;
+        hand.angles[mainAngle[finger] - 1] = -hand.curl[finger] * 55;
+    }
     if (hand.trigger >= .6f) hand.buttons |= bit(Button::trigger);
     if (hand.grip >= .6f) hand.buttons |= bit(Button::grip);
     if (hand.pad >= .6f) hand.buttons |= bit(Button::pad);

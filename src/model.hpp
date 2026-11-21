@@ -38,6 +38,7 @@ struct Hand {
     std::uint32_t buttons{};
     float stickX{}, stickY{}, trigger{}, grip{}, pad{};
     std::array<float, 5> curl{};
+    std::array<float, 23> angles{};
     std::array<Joint, jointCount> joints{};
     std::array<char, 40> firmware{};
     std::array<char, 96> message{};

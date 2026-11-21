@@ -208,6 +208,10 @@ private:
             sample_.stickX = axis(packet.joystickData.joyX);
             sample_.stickY = axis(packet.joystickData.joyY);
             break;
+        case CMD_ANGLE:
+            std::transform(packet.result.begin(), packet.result.begin() + sample_.angles.size(), sample_.angles.begin(),
+                             [](double value) { return static_cast<float>(value); });
+            break;
         case CMD_INPUT_BUTTON: {
             const auto& b = packet.button;
             sample_.buttons = (b.btnA ? bit(Button::a) : 0) | (b.btnB ? bit(Button::b) : 0)

@@ -11,7 +11,7 @@ Millis now();
 
 class Bus {
 public:
-    explicit Bus(const std::wstring& name = L"Local\\OpenCap.Session.v1");
+    explicit Bus(const std::wstring& name = L"Local\\OpenCap.Session.v2");
     ~Bus();
     Bus(const Bus&) = delete;
     Bus& operator=(const Bus&) = delete;

@@ -1,4 +1,5 @@
 #include "bridge.hpp"
+#include "osc_compat.hpp"
 
 #include <windows.h>
 #include <cmath>
@@ -40,6 +41,13 @@ int main() {
         const auto point = rotate(eulerDegrees({0, 0, 90}), {1, 0, 0});
         require(std::abs(point.x) < 1e-5f && std::abs(point.y - 1) < 1e-5f, "Rotation is right-handed");
         require(normalize({0, 0, 0, 0}).w == 1.0f, "Invalid quaternion resets to identity");
+        require(avatarBits(.5f) == 2 && avatarBits(.25f) == 4 && avatarBits(.1f) == 10,
+                "Avatar bits select the nearest reciprocal");
+        Snapshot avatar;
+        avatar.hands[1].angles[15] = 6;
+        const auto parameters = avatarParameters(avatar, Side::left);
+        require(parameters[11].control == "Ring1spread" && parameters[11].bits == 2,
+                "Ring spread preserves first-party channel selection");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

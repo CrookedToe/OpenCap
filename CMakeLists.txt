@@ -9,8 +9,6 @@ include(FetchContent)
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 option(OPENCAP_RECEIVER "Build physical UDCAP receiver support" ON)
 set(OPENVR_SDK_ROOT "" CACHE PATH "Path to an existing OpenVR SDK")
@@ -27,8 +25,10 @@ set_target_properties(openvr_client PROPERTIES
     IMPORTED_LOCATION "${OPENVR_SDK_ROOT}/lib/win64/openvr_api.lib"
     INTERFACE_INCLUDE_DIRECTORIES "${OPENVR_SDK_ROOT}/headers")
 
-add_library(opencap_bridge STATIC src/bridge.cpp src/model.cpp)
+add_library(opencap_bridge STATIC src/bridge.cpp src/model.cpp src/osc_compat.cpp)
 target_include_directories(opencap_bridge PUBLIC src)
+target_compile_definitions(opencap_bridge PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(opencap_bridge PUBLIC "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 add_executable(OpenCap WIN32 src/desktop.cpp src/stream.cpp)
 target_link_libraries(OpenCap PRIVATE opencap_bridge shell32 ole32 comdlg32 ws2_32)

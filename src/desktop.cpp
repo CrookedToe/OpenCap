@@ -340,7 +340,13 @@ private:
         case applyStream:
             try {
                 const auto address = field(udpIp);
-                StreamSettings next{std::string(address.begin(), address.end()), parse<unsigned>(field(vmcPort)), parse<unsigned>(field(oscPort))};
+                std::string ip;
+                for (const auto character : address) {
+                    if ((character < L'0' || character > L'9') && character != L'.')
+                        throw std::invalid_argument("Invalid IPv4 character");
+                    ip.push_back(static_cast<char>(character));
+                }
+                StreamSettings next{std::move(ip), parse<unsigned>(field(vmcPort)), parse<unsigned>(field(oscPort))};
                 if (!stream_.configure(next)) throw std::invalid_argument("Invalid endpoint");
                 prefs_.stream = std::move(next);
                 save();
