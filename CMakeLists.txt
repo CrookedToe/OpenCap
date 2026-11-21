@@ -42,10 +42,14 @@ add_executable(OpenCap WIN32 src/desktop.cpp src/desktop_main.cpp src/desktop_vi
     src/hand_view.cpp src/input_dialog.cpp src/stream.cpp)
 target_link_libraries(OpenCap PRIVATE opencap_desktop_preferences opencap_udcap_preferences opencap_firmware shell32 ole32 comdlg32 ws2_32 sapi)
 if(OPENCAP_RECEIVER)
+    find_package(Git REQUIRED)
     set(BUILD_TEST_TOOLS OFF CACHE BOOL "" FORCE)
     set(COPY_HIDAPI_DLL OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(community_core
-        URL https://github.com/OldestNova/UdCap-Community-HandDriver-Core/archive/14987ad6751761fde0f587f4687cb6aaa8e46414.tar.gz)
+        URL https://github.com/OldestNova/UdCap-Community-HandDriver-Core/archive/14987ad6751761fde0f587f4687cb6aaa8e46414.tar.gz
+        PATCH_COMMAND "${CMAKE_COMMAND}" "-DGIT=${GIT_EXECUTABLE}"
+            "-DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-calibration.patch"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchCommunityCore.cmake")
     FetchContent_MakeAvailable(community_core)
     target_sources(OpenCap PRIVATE src/receiver.cpp)
     target_link_libraries(OpenCap PRIVATE UdCapCommunityDriverCore)
@@ -98,4 +102,17 @@ if(BUILD_TESTING)
     add_executable(OpenCapFirmwareChecks tests/firmware_image.cpp)
     target_link_libraries(OpenCapFirmwareChecks PRIVATE opencap_firmware)
     add_test(NAME OpenCapFirmwareChecks COMMAND OpenCapFirmwareChecks)
+    if(OPENCAP_RECEIVER)
+        add_executable(OpenCapCalibrationChecks tests/calibration.cpp
+            "${community_core_SOURCE_DIR}/src/UdCapV1Core.cpp"
+            "${community_core_SOURCE_DIR}/src/CorePref.cpp"
+            "${community_core_SOURCE_DIR}/src/CommunityV1Calibration.cpp"
+            "${community_core_SOURCE_DIR}/src/OfficialCalibration.cpp"
+            "${community_core_SOURCE_DIR}/manual-serial/PortAccessor.cpp")
+        target_include_directories(OpenCapCalibrationChecks PRIVATE
+            "${community_core_SOURCE_DIR}/src" "${community_core_SOURCE_DIR}/manual-serial")
+        target_compile_definitions(OpenCapCalibrationChecks PRIVATE USE_MANUAL_SERIAL_DRIVER=1)
+        target_link_libraries(OpenCapCalibrationChecks PRIVATE AR1Linear Eigen nlohmann_json::nlohmann_json)
+        add_test(NAME OpenCapCalibrationChecks COMMAND OpenCapCalibrationChecks)
+    endif()
 endif()

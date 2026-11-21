@@ -89,7 +89,12 @@ public:
             try { core_.loadPref(); readButtonRanges(); }
             catch (const std::exception& error) { report(error.what()); }
         }
-        if (loadedRevision_ == revision || read().calibrationStep != 0) return;
+        if (read().calibrationStep != 0) return;
+        if (core_.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_NONE && core_.handCalibrationSamples()) {
+            try { core_.tryRestoreHandCalibration(); }
+            catch (const std::exception& error) { report(error.what()); }
+        }
+        if (loadedRevision_ == revision) return;
         loadedRevision_ = revision;
         if (defaults.empty() || !revision) return;
         try {
@@ -105,7 +110,7 @@ public:
         } catch (const std::exception& error) { report(error.what()); }
     }
 
-    void command(const Command& request) {
+    void command(const Command& request, const std::filesystem::path& directory) {
         try {
             auto stage = read().calibrationStep;
             if (request.action != Action::pairStart && request.action != Action::pairStop &&
@@ -116,35 +121,27 @@ public:
             case Action::startHand:
                 if (stage == 4) throw std::runtime_error("Finish the joystick calibration first.");
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
-                capturedRaw_.fill(false);
                 stage = 1;
                 break;
             case Action::fist:
                 if (stage == 1) {
-                    core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_FIST);
-                    captureRaw(0);
+                    capture(UDCAP_V1_HAND_CALI_TYPE_FIST);
                     stage = 2;
                 }
                 break;
             case Action::together:
                 if (stage == 2) {
-                    core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION);
-                    captureRaw(1);
+                    capture(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION);
                     stage = 3;
                 }
                 break;
             case Action::spread:
                 if (stage == 3) {
-                    core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
-                    captureRaw(2);
+                    capture(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
+                    setCalibrationStep(0);
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
-                    {
-                        std::lock_guard lock(mutex_);
-                        sample_.quality = std::ranges::all_of(capturedRaw_, [](bool present) { return present; })
-                            ? calibrationSpans(calibrationRaw_) : CalibrationSpans{};
-                    }
                     stage = 0;
-                    save();
+                    save(directory);
                 }
                 break;
             case Action::cancelHand:
@@ -166,7 +163,8 @@ public:
                 if (stage == 4) {
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
                     stage = 0;
-                    save();
+                    setCalibrationStep(stage);
+                    save(directory);
                 }
                 break;
             case Action::pairStart: core_.mcuStartPairing(); break;
@@ -190,7 +188,7 @@ public:
                 auto angles = core_.getHandOffset();
                 *jointRotations(angles)[index] = {offset.x, offset.y, offset.z};
                 core_.setHandOffset(angles);
-                save();
+                save(directory);
                 break;
             }
             case Action::setButtonRanges: {
@@ -203,7 +201,7 @@ public:
                 core_.setTrackpadButtonMin(request.ranges[2].touch);
                 core_.setTrackpadButtonMax(request.ranges[2].click);
                 readButtonRanges();
-                save();
+                save(directory);
                 break;
             }
             case Action::toggleStick:
@@ -221,12 +219,17 @@ public:
     }
 
 private:
-    void captureRaw(std::size_t step) {
+    void setCalibrationStep(unsigned step) {
         std::lock_guard lock(mutex_);
+        sample_.calibrationStep = step;
+    }
+
+    void capture(UdCapV1HandCaliType pose) {
         const auto time = now();
-        if (!sample_.lastFrame || time - sample_.lastFrame > sampleTimeout) return;
-        calibrationRaw_[step] = latestRaw_;
-        capturedRaw_[step] = true;
+        const auto last = read().lastFrame;
+        if (!last || (time >= last && time - last > sampleTimeout))
+            throw std::runtime_error("Wait for live glove data before capturing the pose.");
+        core_.captureCalibrationData(pose);
     }
 
     void readButtonRanges() {
@@ -241,16 +244,23 @@ private:
         copyText(sample_.message, message);
     }
 
-    void import(const std::filesystem::path& directory, const ReceiverPreferences& defaults, const std::string& serial) {
+    static std::filesystem::path profilePath(const std::filesystem::path& directory, const std::string& serial) {
         if (serial.size() > 32 || serial.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != std::string::npos)
-            throw std::runtime_error("Invalid glove identity for importing settings.");
+            throw std::runtime_error("Invalid glove identity.");
+        if (serial.empty()) throw std::runtime_error("Wait for the glove to report its serial number.");
         std::filesystem::create_directories(directory);
-        const auto target = directory / (serial + ".json");
+        return directory / (serial + ".json");
+    }
+
+    struct RemoveTemporary {
+        const std::filesystem::path& path;
+        ~RemoveTemporary() { std::error_code error; std::filesystem::remove(path, error); }
+    };
+
+    void import(const std::filesystem::path& directory, const ReceiverPreferences& defaults, const std::string& serial) {
+        const auto target = profilePath(directory, serial);
         const auto temporary = directory / (serial + ".udcap-import.tmp");
-        struct RemoveTemporary {
-            const std::filesystem::path& path;
-            ~RemoveTemporary() { std::error_code error; std::filesystem::remove(path, error); }
-        } cleanup{temporary};
+        const RemoveTemporary cleanup{temporary};
         if (!core_.savePref(temporary.string())) throw std::runtime_error("Could not prepare glove settings.");
 
         nlohmann::json next;
@@ -276,14 +286,21 @@ private:
             throw std::runtime_error("Glove settings were applied but could not be saved.");
     }
 
-    void save() {
-        if (!core_.savePref()) throw std::runtime_error("Could not save glove calibration.");
+    void save(const std::filesystem::path& directory) {
+        const auto serial = core_.getUDCapSerial();
+        const auto target = profilePath(directory, serial);
+        const auto temporary = directory / (serial + ".opencap-save.tmp");
+        const RemoveTemporary cleanup{temporary};
+        if (!core_.savePref(temporary.string()) || core_.getUDCapSerial() != serial ||
+            !MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Could not save glove settings.");
     }
 
     void receive(const UdCapV1MCUPacket& packet) {
         const auto battery = packet.commandType == CMD_BATTERY ? core_.getBattery() : std::nullopt;
         const auto signal = packet.commandType == CMD_BATTERY ? core_.getRssiDbm() : std::nullopt;
         const bool calibrated = core_.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_COMPLETED;
+        const auto captures = packet.commandType == CMD_READY ? core_.handCalibrationSamples() : std::nullopt;
         std::lock_guard lock(mutex_);
         sample_.calibrated = calibrated;
         switch (packet.commandType) {
@@ -299,6 +316,7 @@ private:
             if (!sample_.linked) {
                 sample_.lastFrame = 0;
                 sample_.calibrationStep = 0;
+                sample_.quality = {};
                 sample_.buttons = 0;
                 sample_.battery = -1;
                 sample_.signal = 0;
@@ -309,7 +327,6 @@ private:
             break;
         case CMD_DATA: {
             const auto time = now();
-            latestRaw_ = packet.angle;
             sample_.linked = true;
             sample_.lastFrame = time;
             if (fpsStart_ == 0) fpsStart_ = time;
@@ -321,6 +338,13 @@ private:
             }
             break;
         }
+        case CMD_SERIAL:
+            sample_.calibrationStep = 0;
+            sample_.quality = {};
+            break;
+        case CMD_READY:
+            sample_.quality = captures ? calibrationSpans(*captures) : CalibrationSpans{};
+            break;
         case CMD_FW_VERSION: copyText(sample_.firmware, packet.fwVersion); break;
         case CMD_GET_CHANNEL: sample_.channel = packet.channel; break;
         case CMD_SET_CHANNEL_DONE: break;
@@ -380,9 +404,6 @@ private:
     Hand sample_;
     Millis fpsStart_{};
     int frames_{};
-    RawGloveSample latestRaw_{};
-    std::array<RawGloveSample, 3> calibrationRaw_{};
-    std::array<bool, 3> capturedRaw_{};
     std::string loadedSerial_;
     std::uint64_t loadedRevision_{};
     UdCapV1Core core_;
@@ -477,7 +498,7 @@ struct Receiver::Impl {
                 const auto device = std::ranges::find_if(devicesNow, [&](const auto& candidate) {
                     return candidate->side() == side;
                 });
-                if (device != devicesNow.end()) (*device)->command(command);
+                if (device != devicesNow.end()) (*device)->command(command, preferences);
             }
         }
     }

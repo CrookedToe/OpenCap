@@ -7,7 +7,7 @@ The Windows reference installation identifies its desktop executable and assembl
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
 | Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and channel scan |
-| Calibration | Three-pose captures, saved joystick center and range, timed voice guidance, and raw sensor spans from the last successful captures | Restore three-pose sensor calibration across restarts, match the first-party quality labels and export format, and compare physical poses |
+| Calibration | Three-pose captures and raw sensor spans saved per glove, recalibration with cancel and recovery, saved joystick center and range, timed voice guidance | Match the first-party quality labels and export format, and compare physical poses including after restarts |
 | Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, five-second joystick shortcut, joint corrections, four UDCAP tracker presets and CSV sample export | Controller revision 2.0 and additional remapping and vibration behaviors, firmware workflows and localization |
 | Streaming | Configurable VMC finger rotations and UDCAP VRChat OSC parameters | Verify VMC coordinates and exercise avatar output with live gloves |
 | SteamVR driver | OpenVR controller input, independent joints, complete 31-bone transforms, tracker selection by serial, pose-source telemetry, controller priority and haptic routing | Verify both hands in SteamVR and in games, including alignment and loss of tracking |

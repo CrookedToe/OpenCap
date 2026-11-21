@@ -1,0 +1,338 @@
+--- a/src/UdCapV1Core.h
++++ b/src/UdCapV1Core.h
+@@ -375,6 +375,9 @@
+     void completeCalibration(UdCapV1DeviceCaliType type);
+ 
+     void tryRestoreHandCalibration();
++
++    using CalibrationSamples = std::array<std::array<int16_t, 19>, 3>;
++    std::optional<CalibrationSamples> handCalibrationSamples() const;
+ 
+     void setAlgorithm(UdCapV1Algorithm algorithm);
+ 
+@@ -454,7 +457,10 @@
+     CommunityV1Calibration communityCalibration;
+     bool communityCalibrationNeedsReset = true;
+     UdCapV1HandData lastAngle{};
+-    UdCapV1LastCaliData lastCaliData;
++    void setCalibrationPose(UdCapV1HandCaliType type, const std::array<int16_t, 19> &sample);
++    std::array<int16_t, 19> lastRaw{};
++    CalibrationSamples pendingCalibration{};
++    std::optional<CalibrationSamples> savedCalibration;
+     std::atomic<UdCapV1JoystickCaliStat> joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
+     float xCenterData = 1850.0;
+     float yCenterData = 1850.0;
+--- a/src/UdCapV1Core.cpp
++++ b/src/UdCapV1Core.cpp
+@@ -163,7 +163,6 @@
+ }
+ 
+ UdCapV1Core::UdCapV1Core(std::shared_ptr<PortAccessor> portAccessor): eventLoopRunning(true), portAccessor(std::move(portAccessor)) {
+-    lastCaliData.hasLast = false;
+     try {
+         this->portAccessor->openPort();
+         this->portAccessor->setBaudRate(115200);
+@@ -180,9 +179,7 @@
+                 lastRssiDbm = 0;
+                 if (udState != UD_INIT_STATE_INIT) {
+                     udState = UD_INIT_STATE_NOT_CONNECT;
+-                    if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
+-                        caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+-                    }
++                    caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+                     UdCapV1MCUPacket linkPacket{};
+                     linkPacket.address = 1;
+                     linkPacket.commandType = CommandType::CMD_LINK_STATE;
+@@ -308,6 +305,8 @@
+     auto acceptGloveSerial = [this, &packetBuffer](const std::string &serial) {
+         if (!isUdCapGloveSerial(serial)) return;
+         if (udCapSerial == serial) return;
++        savedCalibration.reset();
++        caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+         udCapSerial = serial;
+         target = serial.back() == 'L' ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
+         isEnterprise = serial.substr(0, 2) == "AB";
+@@ -341,7 +340,7 @@
+                 mcuStopData();
+             }
+             udState = UdState::UD_INIT_STATE_NOT_CONNECT;
+-            if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
++            caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+         } else if (linkState == 1) {
+             packet.udState = UdState::UD_INIT_STATE_CONNECTED;
+ 
+@@ -441,6 +440,7 @@
+             auto value = (int16_t) ((deData[i] << 8) | deData[i + 1]);
+             iData[i / 2] = value;
+         }
++        lastRaw = iData;
+         packet.angle = iData;
+         callListenCallback(packet);
+         // Start Calc
+@@ -926,8 +926,8 @@
+         throw std::runtime_error("Core not initialized");
+     }
+     if (type == UdCapV1DeviceCaliType::UDCAP_V1_DEVICE_CALI_TYPE_HAND) {
+-        if (caliStat != UDCAP_V1_HAND_CALI_STAT_NONE) {
+-            throw std::runtime_error("Calibration already called");
++        if (caliStat == UDCAP_V1_HAND_CALI_STAT_AUTO) {
++            throw std::runtime_error("Calibration already in progress");
+         }
+         caliStat = UDCAP_V1_HAND_CALI_STAT_AUTO;
+         communityCalibrationNeedsReset = true;
+@@ -958,44 +958,24 @@
+     if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
+         throw std::runtime_error("Calibration already completed");
+     }
+-    if (type == UDCAP_V1_HAND_CALI_TYPE_ALL) {
++    if (type < UDCAP_V1_HAND_CALI_TYPE_FIST || type > UDCAP_V1_HAND_CALI_TYPE_PROTRACT) {
+         throw std::runtime_error("Invalid calibration type");
+-    } else if (type == UDCAP_V1_HAND_CALI_TYPE_FIST) {
+-        // TODO improve accuracy
+-        caliFist.captured = true;
+-        caliFist.h4 = lastAngle.f4;
+-        caliFist.h5 = lastAngle.f5;
+-        caliFist.h6 = lastAngle.f6;
+-        caliFist.h7 = lastAngle.f7;
+-        caliFist.h9 = lastAngle.f9;
+-        caliFist.h10 = lastAngle.f10;
+-        caliFist.h12 = lastAngle.f12;
+-        caliFist.h13 = lastAngle.f13;
+-        caliFist.h15 = lastAngle.f15;
++    }
++    pendingCalibration[type - UDCAP_V1_HAND_CALI_TYPE_FIST] = lastRaw;
++    setCalibrationPose(type, lastRaw);
++}
++
++void UdCapV1Core::setCalibrationPose(UdCapV1HandCaliType type, const std::array<int16_t, 19> &s) {
++    if (type == UDCAP_V1_HAND_CALI_TYPE_FIST) {
++        caliFist = {true, double(s[0]), double(s[1]), double(s[2]), double(s[3]),
++                    double(s[5]), double(s[6]), double(s[8]), double(s[9]), double(s[11])};
+     } else if (type == UDCAP_V1_HAND_CALI_TYPE_ADDUCTION) {
+-        // TODO improve accuracy
+-        caliAdduction.captured = true;
+-        caliAdduction.n1 = lastAngle.f1;
+-        caliAdduction.n2 = lastAngle.f2;
+-        caliAdduction.n3 = lastAngle.f3;
+-        caliAdduction.n4 = lastAngle.f4;
+-        caliAdduction.n5 = lastAngle.f5;
+-        caliAdduction.n6 = lastAngle.f6;
+-        caliAdduction.n7 = lastAngle.f7;
+-        caliAdduction.n8 = lastAngle.f8;
+-        caliAdduction.n9 = lastAngle.f9;
+-        caliAdduction.n10 = lastAngle.f10;
+-        caliAdduction.n11 = lastAngle.f11;
+-        caliAdduction.n12 = lastAngle.f12;
+-        caliAdduction.n13 = lastAngle.f13;
+-        caliAdduction.n14 = lastAngle.f14;
+-        caliAdduction.n15 = lastAngle.f15;
++        const auto normalized = [](int16_t value) { return (float(value) - 1000.0f) / 1000.0f; };
++        caliAdduction = {true, normalized(s[13]), normalized(s[14]), normalized(s[15]),
++                         double(s[0]), double(s[1]), double(s[2]), double(s[3]), double(s[4]), double(s[5]),
++                         double(s[6]), double(s[7]), double(s[8]), double(s[9]), double(s[10]), double(s[11])};
+     } else if (type == UDCAP_V1_HAND_CALI_TYPE_PROTRACT) {
+-        // TODO improve accuracy
+-        caliProtract.captured = true;
+-        caliProtract.h8 = lastAngle.f8;
+-        caliProtract.h11 = lastAngle.f11;
+-        caliProtract.h14 = lastAngle.f14;
++        caliProtract = {true, double(s[4]), double(s[7]), double(s[10])};
+     }
+ }
+ 
+@@ -1010,7 +990,7 @@
+             throw std::runtime_error("Can not clear single calibration data after completed");
+             } else {
+                 caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+-                lastCaliData.hasLast = false;
++                savedCalibration.reset();
+             memset(&caliFist, 0, sizeof(caliFist));
+             memset(&caliAdduction, 0, sizeof(caliAdduction));
+             memset(&caliProtract, 0, sizeof(caliProtract));
+@@ -1026,7 +1006,7 @@
+         }
+     }
+     if (type == UDCAP_V1_HAND_CALI_TYPE_ALL) {
+-        lastCaliData.hasLast = false;
++        savedCalibration.reset();
+         memset(&caliFist, 0, sizeof(caliFist));
+         memset(&caliAdduction, 0, sizeof(caliAdduction));
+         memset(&caliProtract, 0, sizeof(caliProtract));
+@@ -1045,6 +1025,37 @@
+     }
+ }
+ 
++// Bend uses the fist capture. The three splay channels use the spread capture.
++static bool hasHandCalibrationMovement(const UdCapV1Core::CalibrationSamples &samples) {
++    for (std::size_t i = 0; i < 12; ++i) {
++        const bool splay = i == 4 || i == 7 || i == 10;
++        if (std::abs(samples[splay ? 2 : 0][i] - samples[1][i]) > 25) return true;
++    }
++    return false;
++}
++
++static std::optional<UdCapV1Core::CalibrationSamples> readHandCalibration(
++        const nlohmann::json &profile, const std::string &serial) {
++    if (serial.empty() || !profile.is_object() || !profile.contains("serial") ||
++        profile["serial"] != serial || !profile.contains("poses")) return std::nullopt;
++    const auto &poses = profile["poses"];
++    UdCapV1Core::CalibrationSamples samples{};
++    if (!poses.is_array() || poses.size() != samples.size()) return std::nullopt;
++    for (std::size_t pose = 0; pose < samples.size(); ++pose) {
++        if (!poses[pose].is_array() || poses[pose].size() != samples[pose].size()) return std::nullopt;
++        for (std::size_t i = 0; i < samples[pose].size(); ++i) {
++            const auto &value = poses[pose][i];
++            if (!value.is_number_integer()) return std::nullopt;
++            if (value.is_number_unsigned() && value.get<uint64_t>() > INT16_MAX) return std::nullopt;
++            const auto counts = value.get<int64_t>();
++            if (counts < INT16_MIN || counts > INT16_MAX) return std::nullopt;
++            samples[pose][i] = static_cast<int16_t>(counts);
++        }
++    }
++    if (!hasHandCalibrationMovement(samples)) return std::nullopt;
++    return samples;
++}
++
+ void UdCapV1Core::completeCalibration(UdCapV1DeviceCaliType type) {
+     std::lock_guard guard(stateMutex);
+     if (udState != UD_INIT_STATE_LINKED) {
+@@ -1066,71 +1077,11 @@
+         if (!caliProtract.captured) {
+             throw std::runtime_error("Protract calibration not captured");
+         }
+-        double f[12]{
+-            lastAngle.f4,
+-            lastAngle.f5,
+-            lastAngle.f6,
+-            lastAngle.f7,
+-            lastAngle.f8,
+-            lastAngle.f9,
+-            lastAngle.f10,
+-            lastAngle.f11,
+-            lastAngle.f12,
+-            lastAngle.f13,
+-            lastAngle.f14,
+-            lastAngle.f15
+-        };
+-        double array2[12]{
+-            caliAdduction.n4,
+-            caliAdduction.n5,
+-            caliAdduction.n6,
+-            caliAdduction.n7,
+-            caliAdduction.n8,
+-            caliAdduction.n9,
+-            caliAdduction.n10,
+-            caliAdduction.n11,
+-            caliAdduction.n12,
+-            caliAdduction.n13,
+-            caliAdduction.n14,
+-            caliAdduction.n15
+-        };
+-        double array3[12]{
+-            caliFist.h4,
+-            caliFist.h5,
+-            caliFist.h6,
+-            caliFist.h7,
+-            caliProtract.h8,
+-            caliFist.h9,
+-            caliFist.h10,
+-            caliProtract.h11,
+-            caliFist.h12,
+-            caliFist.h13,
+-            caliProtract.h14,
+-            caliFist.h15
+-        };
+-        // The device's original calibration accepts a usable movement on any
+-        // finger channel; requiring every sensor to exceed the threshold makes
+-        // an otherwise working glove fail because of one weak channel.
+-        bool calibrationSuccess = false;
+-        for (int i = 0; i < 12; i++) {
+-            if (std::abs(array3[i] - array2[i]) > 25.0) {
+-                calibrationSuccess = true;
+-                break;
+-            }
+-        }
+-        if (!calibrationSuccess) {
+-            caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+-            UdCapV1MCUPacket caliPacket {};
+-            caliPacket.address = 1;
+-            caliPacket.commandType = CommandType::CMD_READY;
+-            caliPacket.isReady = false;
+-            callListenCallback(caliPacket);
+-            throw std::runtime_error("Calibration failed");
+-        }
+-        lastCaliData.caliFist = caliFist;
+-        lastCaliData.caliAdduction = caliAdduction;
+-        lastCaliData.caliProtract = caliProtract;
+-        lastCaliData.hasLast = true;
++        if (!hasHandCalibrationMovement(pendingCalibration)) {
++            tryRestoreHandCalibration();
++            throw std::runtime_error("Calibration failed. Move your fingers further apart between poses.");
++        }
++        savedCalibration = pendingCalibration;
+         communityCalibrationNeedsReset = true;
+         caliStat = UDCAP_V1_HAND_CALI_STAT_COMPLETED;
+         UdCapV1MCUPacket caliPacket {};
+@@ -1151,21 +1102,24 @@
+     if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
+         return;
+     }
+-    if (caliStat != UDCAP_V1_HAND_CALI_STAT_NONE) {
+-        throw std::runtime_error("Calibration already in progress");
+-    }
+-    if (lastCaliData.hasLast) {
++    caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
++    if (savedCalibration) {
++        setCalibrationPose(UDCAP_V1_HAND_CALI_TYPE_FIST, (*savedCalibration)[0]);
++        setCalibrationPose(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION, (*savedCalibration)[1]);
++        setCalibrationPose(UDCAP_V1_HAND_CALI_TYPE_PROTRACT, (*savedCalibration)[2]);
+         caliStat = UDCAP_V1_HAND_CALI_STAT_COMPLETED;
+-        caliFist = lastCaliData.caliFist;
+-        caliAdduction = lastCaliData.caliAdduction;
+-        caliProtract = lastCaliData.caliProtract;
+-        communityCalibrationNeedsReset = true;
+-        UdCapV1MCUPacket caliPacket {};
+-        caliPacket.address = 1;
+-        caliPacket.commandType = CommandType::CMD_READY;
+-        caliPacket.isReady = true;
+-        callListenCallback(caliPacket);
+-    }
++    }
++    communityCalibrationNeedsReset = true;
++    UdCapV1MCUPacket packet{};
++    packet.address = 1;
++    packet.commandType = CommandType::CMD_READY;
++    packet.isReady = savedCalibration.has_value();
++    callListenCallback(packet);
++}
++
++std::optional<UdCapV1Core::CalibrationSamples> UdCapV1Core::handCalibrationSamples() const {
++    std::lock_guard guard(stateMutex);
++    return savedCalibration;
+ }
+ 
+ void UdCapV1Core::captureJoystickData(UdCapV1JoystickCaliType type) {
+@@ -1491,6 +1445,11 @@
+         }
+         setHandOffset(loadedOffset);
+         handResponse = loadedResponse;
++        if (udState == UD_INIT_STATE_LINKED && caliStat == UDCAP_V1_HAND_CALI_STAT_NONE &&
++            j.contains("handCalibration")) {
++            savedCalibration = readHandCalibration(j["handCalibration"], udCapSerial);
++            if (savedCalibration) tryRestoreHandCalibration();
++        }
+         return true;
+     } catch (const std::exception&) {
+         if (inFile.is_open()) inFile.close();
+@@ -1608,7 +1567,9 @@
+     for (const auto &c : handResponse)
+         j["handResponse"].push_back({{"min", c.outputMin}, {"max", c.outputMax},
+                                       {"balance", c.balance}, {"offset", c.offset}});
++    if (savedCalibration && !udCapSerial.empty())
++        j["handCalibration"] = {{"serial", udCapSerial}, {"poses", *savedCalibration}};
+     outFile << j.dump(4); // Pretty print with 4 spaces
+     outFile.close();
+-    return true;
+-}
++    return outFile.good();
++}
