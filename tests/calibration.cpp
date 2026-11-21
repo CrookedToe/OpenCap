@@ -3,9 +3,12 @@
 #include <nlohmann/json.hpp>
 #include <windows.h>
 
+#include <cmath>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 
 namespace {
@@ -27,7 +30,7 @@ void send(PortAccessor& port, CommandType command, const std::vector<std::uint8_
     port.injectReceivedData(packet);
 }
 
-void frame(PortAccessor& port, const Sample& sample) {
+void frame(PortAccessor& port, const std::span<const std::int16_t> sample) {
     std::vector<std::uint8_t> data;
     for (const auto value : sample) {
         const auto counts = static_cast<std::uint16_t>(value);
@@ -42,13 +45,18 @@ void connect(PortAccessor& port, std::string_view serial) {
     std::vector<std::uint8_t> link{1};
     link.insert(link.end(), serial.begin(), serial.end());
     send(port, CMD_LINK_STATE, link);
-    frame(port, {});
+    frame(port, Sample{});
 }
 
-std::shared_ptr<PortAccessor> port() {
+using Writes = std::vector<std::vector<std::uint8_t>>;
+
+std::shared_ptr<PortAccessor> port(Writes* writes = nullptr) {
     auto result = std::make_shared<PortAccessor>();
     ManualSerialDriverCallbacks callbacks;
-    callbacks.write = [](const std::uint8_t*, std::size_t count) { return count; };
+    callbacks.write = [writes](const std::uint8_t* data, std::size_t count) {
+        if (writes) writes->emplace_back(data, data + count);
+        return count;
+    };
     result->bindSerialCallbacks(callbacks);
     return result;
 }
@@ -62,6 +70,48 @@ void calibrate(UdCapV1Core& core, PortAccessor& transport, const UdCapV1Core::Ca
         core.captureCalibrationData(poses[i]);
     }
     core.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+}
+
+void checkController(const UdCapV1Core::CalibrationSamples& captures) {
+    std::mutex mutex;
+    std::condition_variable changes;
+    bool sawV2Axis = false, sawV2Button = false;
+    Writes writes;
+    auto transport = port(&writes);
+    UdCapV1Core core(transport);
+    core.listen([&](const auto& packet) {
+        std::lock_guard lock(mutex);
+        if (packet->commandType == CMD_INPUT_JOYSTICK &&
+            std::abs(packet->joystickData.joyX - .3f) < .001f && packet->joystickData.joyY == 0) sawV2Axis = true;
+        if (packet->commandType == CMD_INPUT_BUTTON && packet->button.btnB &&
+            packet->button.btnJoyStick && !packet->button.btnA && !packet->button.btnMenu) sawV2Button = true;
+        changes.notify_all();
+    });
+    connect(*transport, glove);
+    calibrate(core, *transport, captures);
+    core.mcuSendHaptic(.125f, .8f, 140);
+    require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 3, 0, 12, 8, 32},
+            "Route legacy haptics to the glove's vibration command");
+    std::array<std::int16_t, 15> compact{};
+    compact[12] = 2600;
+    compact[13] = 2000;
+    compact[14] = 128 + 4 + 1;
+    frame(*transport, compact);
+    {
+        std::unique_lock lock(mutex);
+        require(changes.wait_for(lock, std::chrono::seconds(2), [&] { return sawV2Axis && sawV2Button; }),
+                "Decode the Controller 2.0 joystick and buttons from the compact frame");
+    }
+    core.mcuSendHaptic(.125f, .8f, 140);
+    require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 0x98, 3, 140, 0, 125, 0, 125},
+            "Encode Controller 2.0 haptics with independent strength, frequency and time");
+    core.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
+    core.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_CENTER);
+    core.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
+    for (std::uint8_t step = 1; step <= 3; ++step) {
+        const std::vector<std::uint8_t> expected{85, 170, 1, 0xcc, 1, step, static_cast<std::uint8_t>(0xce + step)};
+        require(writes[writes.size() - 4 + step] == expected, "Send Controller 2.0 calibration actions in order");
+    }
 }
 }
 
@@ -78,6 +128,7 @@ int main() {
         captures[1][0] = 200;
         captures[1][13] = 850;
         captures[2][4] = 456;
+        checkController(captures);
         {
             auto transport = port();
             UdCapV1Core core(transport);

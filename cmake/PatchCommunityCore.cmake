@@ -1,5 +1,18 @@
-execute_process(COMMAND "${GIT}" apply --no-index --reverse --check "${PATCH}"
-    RESULT_VARIABLE already_applied OUTPUT_QUIET ERROR_QUIET)
-if(NOT already_applied EQUAL 0)
-    execute_process(COMMAND "${GIT}" apply --no-index "${PATCH}" COMMAND_ERROR_IS_FATAL ANY)
+function(patch_applied path result)
+    execute_process(COMMAND "${GIT}" apply --no-index --reverse --check "${path}"
+        RESULT_VARIABLE status OUTPUT_QUIET ERROR_QUIET)
+    if(status EQUAL 0)
+        set("${result}" TRUE PARENT_SCOPE)
+    else()
+        set("${result}" FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+patch_applied("${CONTROLLER_PATCH}" have_controller)
+if(NOT have_controller)
+    patch_applied("${PATCH}" have_calibration)
+    if(NOT have_calibration)
+        execute_process(COMMAND "${GIT}" apply --no-index "${PATCH}" COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    execute_process(COMMAND "${GIT}" apply --no-index "${CONTROLLER_PATCH}" COMMAND_ERROR_IS_FATAL ANY)
 endif()

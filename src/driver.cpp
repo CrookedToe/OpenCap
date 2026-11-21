@@ -218,7 +218,7 @@ public:
         if (!enabled || !haptic_ || event.componentHandle != haptic_ ||
             !std::isfinite(event.fAmplitude) || !std::isfinite(event.fDurationSeconds) ||
             event.fAmplitude <= 0 || event.fDurationSeconds <= 0) return;
-        bus.send({side_, Action::haptic, 0, event.fDurationSeconds, event.fAmplitude});
+        bus.send({side_, Action::haptic, 0, event.fDurationSeconds, event.fAmplitude, event.fFrequency});
     }
 
 private:

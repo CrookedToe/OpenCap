@@ -49,6 +49,7 @@ if(OPENCAP_RECEIVER)
         URL https://github.com/OldestNova/UdCap-Community-HandDriver-Core/archive/14987ad6751761fde0f587f4687cb6aaa8e46414.tar.gz
         PATCH_COMMAND "${CMAKE_COMMAND}" "-DGIT=${GIT_EXECUTABLE}"
             "-DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-calibration.patch"
+            "-DCONTROLLER_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-controller.patch"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchCommunityCore.cmake")
     FetchContent_MakeAvailable(community_core)
     target_sources(OpenCap PRIVATE src/receiver.cpp)

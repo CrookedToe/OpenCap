@@ -177,9 +177,7 @@ public:
                 core_.mcuGetChannel();
                 break;
             case Action::haptic:
-                if (std::isfinite(request.duration) && request.duration > 0 && unit(request.amplitude) > 0) {
-                    core_.mcuSendVibration(1, request.duration, static_cast<int>(std::lround(10 * unit(request.amplitude))));
-                }
+                core_.mcuSendHaptic(request.duration, request.amplitude, request.extra);
                 break;
             case Action::setJointOffset: {
                 const auto index = static_cast<std::size_t>(request.value);
@@ -339,6 +337,7 @@ private:
             break;
         }
         case CMD_SERIAL:
+            sample_.lastFrame = 0;
             sample_.calibrationStep = 0;
             sample_.quality = {};
             break;
