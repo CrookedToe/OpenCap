@@ -12,6 +12,7 @@ struct Preferences {
     bool hotkey{};
     std::uint64_t udcapImport{};
     bool quickStick{};
+    bool steamLifecycle{};
 };
 
 std::filesystem::path executableFolder();

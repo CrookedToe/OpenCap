@@ -31,7 +31,7 @@ enum Control {
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
     applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
-    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage
+    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup
 };
 
 struct CalibrationControl {
@@ -70,9 +70,9 @@ private:
 
 class Desktop {
 public:
-    Desktop(bool demo, const std::wstring& session, bool isolated)
+    Desktop(bool demo, const std::wstring& session, bool isolated, HANDLE steamOverlay)
         : demo_(demo), folder_(isolated ? std::filesystem::path{} : configFolder(demo)),
-          prefs_(loadSettings(folder_)), bus_(session), voice_(!isolated) {
+          prefs_(loadSettings(folder_)), bus_(session), voice_(!isolated), steamOverlay_(steamOverlay) {
         if (!bus_.reset()) throw std::runtime_error("Could not initialize the OpenCap session.");
         snapshot_.demo = demo_;
         UdcapPreferences vendor;
@@ -223,6 +223,10 @@ private:
         edit(oscPort, 499, 654, 77);
         button(applyStream, L"Apply streaming", 592, 651, 167);
         button(inspectImage, L"Inspect firmware image…", 683, 716, 206);
+        if (!demo_) {
+            button(steamStartup, L"Start and stop with SteamVR", 30, 720, 254, BS_AUTOCHECKBOX);
+            CheckDlgButton(window_, steamStartup, prefs_.steamLifecycle ? BST_CHECKED : BST_UNCHECKED);
+        }
         showStream();
         if (prefs_.hotkey && !RegisterHotKey(window_, 1, MOD_NOREPEAT, VK_F1)) prefs_.hotkey = false;
         CheckDlgButton(window_, globalHotkey, prefs_.hotkey ? BST_CHECKED : BST_UNCHECKED);
@@ -330,6 +334,10 @@ private:
         switch (id) {
         case importUdcap: importSettings(); break;
         case inspectImage: showFirmwareImage(window_); break;
+        case steamStartup:
+            prefs_.steamLifecycle = IsDlgButtonChecked(window_, id) == BST_CHECKED;
+            save();
+            break;
         case useTrackingPlan:
             usePreset(static_cast<std::size_t>(SendDlgItemMessageW(window_, trackingPlan, CB_GETCURSEL, 0, 0)));
             break;
@@ -535,6 +543,10 @@ private:
     }
 
     void tick() {
+        if (steamOverlay_ && WaitForSingleObject(steamOverlay_, 0) == WAIT_OBJECT_0) {
+            PostMessageW(window_, WM_CLOSE, 0, 0);
+            return;
+        }
         const auto time = now();
         for (unsigned i = 0; i < 32; ++i) {
             const auto command = bus_.next();
@@ -670,6 +682,7 @@ private:
     Bus bus_;
     Stream stream_;
     Voice voice_;
+    HANDLE steamOverlay_{};
 #ifdef OPENCAP_RECEIVER
     std::unique_ptr<Receiver> receiver_;
 #endif
@@ -690,7 +703,7 @@ private:
 };
 }
 
-int opencap::runDesktop(HINSTANCE instance, int show, bool demo, const std::wstring& session, bool isolated) {
-    Desktop app(demo, session, isolated);
+int opencap::runDesktop(HINSTANCE instance, int show, bool demo, const std::wstring& session, bool isolated, HANDLE steamOverlay) {
+    Desktop app(demo, session, isolated, steamOverlay);
     return app.run(instance, show);
 }

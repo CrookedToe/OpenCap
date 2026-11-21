@@ -1,4 +1,5 @@
 #include "udcap_preferences.hpp"
+#include "desktop_preferences.hpp"
 
 #include <windows.h>
 #include <cmath>
@@ -31,7 +32,7 @@ struct Fixture {
     ~Fixture() {
         std::error_code error;
         for (const auto& path : {sources.desktopDefaults, sources.desktopSettings, sources.steamvrDefaults,
-                                 sources.steamvrRegistry, vr, root})
+                                 sources.steamvrRegistry, vr, root / L"settings.txt", root})
             std::filesystem::remove(path, error);
     }
 };
@@ -48,6 +49,18 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         Fixture f;
+        Preferences preferences;
+        preferences.quickStick = true;
+        preferences.steamLifecycle = true;
+        preferences.hands[0].tracker = 8;
+        require(saveSettings(f.root, preferences), "Save optional shortcut and SteamVR lifecycle settings");
+        std::ifstream saved(f.root / L"settings.txt");
+        int format = 0;
+        saved >> format;
+        saved.close();
+        const auto restored = loadSettings(f.root);
+        require(format == 3 && restored.quickStick && restored.steamLifecycle && restored.hands[0].tracker == 8,
+                "New preferences retain a file version the previous application can read");
         put(f.sources.desktopDefaults, R"xml(<configuration><appSettings>
           <add key="L_Rocky_X_Min" value="600"/><add key="L_Rocky_X_Center" value="1800"/>
           <add key="L_Rocky_X_Max" value="3800"/><add key="L_Vibartion_Enable" value="True"/>

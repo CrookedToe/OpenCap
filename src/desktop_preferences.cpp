@@ -42,7 +42,7 @@ Preferences loadSettings(const std::filesystem::path& path) {
     std::ifstream input(path / "settings.txt");
     input.imbue(std::locale::classic());
     int version = 0;
-    if (!(input >> version) || version < 1 || version > 4) return {};
+    if (!(input >> version) || version < 1 || version > 5) return {};
     for (auto& hand : settings.hands) {
         auto& p = hand.position;
         auto& r = hand.rotation;
@@ -65,7 +65,8 @@ Preferences loadSettings(const std::filesystem::path& path) {
         || s.vmcPort > 65535 || s.oscPort > 65535) return {};
     s.oscAddress = s.address;
     if (version >= 3 && !(input >> std::quoted(s.oscAddress) >> settings.udcapImport)) return {};
-    if (version >= 4 && !(input >> settings.quickStick)) return {};
+    if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> settings.quickStick)) return {};
+    if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> settings.steamLifecycle)) return {};
     return settings;
 }
 
@@ -75,7 +76,8 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
     {
         std::ofstream output(tmp, std::ios::trunc);
         output.imbue(std::locale::classic());
-        output << "4\n" << std::setprecision(8);
+        // Older OpenCap builds can still read the original fields after rollback.
+        output << "3\n" << std::setprecision(8);
         for (const auto& hand : settings.hands) {
             const auto p = hand.position, r = hand.rotation;
             output << hand.tracker << ' ' << p.x << ' ' << p.y << ' ' << p.z << ' '
@@ -88,7 +90,8 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
         }
         const auto& s = settings.stream;
         output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey
-               << ' ' << std::quoted(s.oscAddress) << ' ' << settings.udcapImport << ' ' << settings.quickStick << '\n';
+               << ' ' << std::quoted(s.oscAddress) << ' ' << settings.udcapImport << ' ' << settings.quickStick
+               << ' ' << settings.steamLifecycle << '\n';
         output.close();
         if (!output) return false;
     }

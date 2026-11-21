@@ -1,4 +1,5 @@
 #include "bridge.hpp"
+#include "desktop_preferences.hpp"
 
 #include <windows.h>
 #include <openvr.h>
@@ -21,10 +22,21 @@ constexpr COLORREF muted = RGB(151, 173, 187);
 constexpr COLORREF accent = RGB(96, 224, 201);
 constexpr COLORREF panel = RGB(31, 48, 65);
 
-std::filesystem::path executableFolder() {
-    std::wstring path(32768, L'\0');
-    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
-    return std::filesystem::path(path).parent_path();
+void startDesktopIfEnabled() {
+    if (!loadSettings(configFolder(false)).steamLifecycle || FindWindowW(L"OpenCapDesktop", nullptr)) return;
+    const auto directory = executableFolder();
+    const auto executable = directory / L"OpenCap.exe";
+    auto command = L"\"" + executable.wstring() + L"\" --steamvr-session " + std::to_wstring(GetCurrentProcessId());
+    STARTUPINFOW start{};
+    start.cb = sizeof(start);
+    start.dwFlags = STARTF_USESHOWWINDOW;
+    start.wShowWindow = SW_SHOWNOACTIVATE;
+    PROCESS_INFORMATION process{};
+    if (CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                       directory.c_str(), &start, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
 }
 
 class Runtime {
@@ -155,6 +167,7 @@ public:
 
     int run() {
         if (!paint()) throw std::runtime_error("SteamVR rejected the dashboard texture.");
+        startDesktopIfEnabled();
         auto lastPaint = now();
         while (true) {
             if (const auto update = bus_.read(1)) snapshot_ = *update;

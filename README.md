@@ -39,7 +39,7 @@ After completing hand calibration, the hand viewer's data mode shows the measure
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 
-The desktop process owns the receiver connections and publishes the live glove state. The SteamVR driver consumes state and returns vibration requests. The dashboard uses the same commands as the desktop. All three run in the same Windows session.
+The desktop process owns the receiver connections and publishes the live glove state. The SteamVR driver consumes state and returns vibration requests. The dashboard uses the same commands as the desktop. All three run in the same Windows session. Register the dashboard and enable **Start and stop with SteamVR** in OpenCap to have it launch a desktop session. A desktop you started separately can keep running after SteamVR closes.
 
 ## Dependencies
 
