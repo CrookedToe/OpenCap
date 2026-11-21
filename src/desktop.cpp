@@ -145,12 +145,13 @@ private:
         switch (message) {
         case WM_CREATE: create(); return 0;
         case WM_COMMAND:
-            if (HIWORD(wParam) == BN_CLICKED) click(LOWORD(wParam));
+            if (LOWORD(wParam) == trackerNum && HIWORD(wParam) == CBN_DROPDOWN) listTrackers();
+            else if (HIWORD(wParam) == BN_CLICKED) click(LOWORD(wParam));
             return 0;
         case WM_TIMER: tick(); return 0;
         case WM_HOTKEY: if (wParam == 1) startQuick((1u << handCount) - 1); return 0;
         case WM_ERASEBKGND: return 1;
-        case WM_PAINT: paintDesktop(window_, brush_, font_, title_, snapshot_, side_, status_); return 0;
+        case WM_PAINT: paintDesktop(window_, brush_, font_, title_, snapshot_, tracking_, side_, status_); return 0;
         case WM_DESTROY:
             UnregisterHotKey(window_, 1);
             KillTimer(window_, tickTimer);
@@ -201,7 +202,8 @@ private:
         button(useJoystick, L"Joystick", 600, 400, 110, BS_AUTOCHECKBOX);
         button(useHaptics, L"Vibration", 729, 400, 133, BS_AUTOCHECKBOX);
         button(inputMapping, L"Controller…", 755, 444, 134);
-        edit(trackerNum, 422, 497, 110);
+        const auto tracker = item(L"COMBOBOX", L"", CBS_DROPDOWN | WS_VSCROLL, 422, 497, 110, 210, trackerNum);
+        SendMessageW(tracker, CB_SETDROPPEDWIDTH, 280, 0);
         edit(posX, 538, 497, 50); edit(posY, 595, 497, 51); edit(posZ, 652, 497, 50);
         edit(rotX, 709, 497, 52); edit(rotY, 767, 497, 53); edit(rotZ, 827, 497, 53);
         button(applyPose, L"Apply tracker alignment", 422, 531, 228);
@@ -237,7 +239,7 @@ private:
         CheckDlgButton(window_, useJoystick, h.joystick ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useHaptics, h.haptics ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, preferOpenCap, h.highPriority ? BST_CHECKED : BST_UNCHECKED);
-        const auto trackerText = h.trackerSerial[0] ? widen(h.trackerSerial.data())
+        const auto trackerText = h.trackerSerial[0] ? L"ID " + widen(h.trackerSerial.data())
             : h.tracker == noTracker ? L"Auto" : std::to_wstring(h.tracker);
         SetDlgItemTextW(window_, trackerNum, trackerText.c_str());
         for (const auto [id, value] : std::array{
@@ -253,6 +255,19 @@ private:
         wchar_t value[128]{};
         GetDlgItemTextW(window_, id, value, 128);
         return value;
+    }
+
+    void listTrackers() {
+        const auto previous = field(trackerNum);
+        SendDlgItemMessageW(window_, trackerNum, CB_RESETCONTENT, 0, 0);
+        SendDlgItemMessageW(window_, trackerNum, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Auto"));
+        if (trackingCurrent(tracking_, now())) {
+            for (unsigned i = 0; i < tracking_.count && i < tracking_.devices.size(); ++i) {
+                const auto label = L"ID " + widen(tracking_.devices[i].serial.data());
+                SendDlgItemMessageW(window_, trackerNum, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            }
+        }
+        SetDlgItemTextW(window_, trackerNum, previous.c_str());
     }
 
     template <class Number>
@@ -379,11 +394,13 @@ private:
         case applyPose:
             try {
                 auto next = settings;
-                const auto tracker = field(trackerNum);
+                auto tracker = field(trackerNum);
                 next.tracker = noTracker;
                 next.trackerSerial.fill(0);
                 if (!tracker.empty() && tracker != L"Auto" && tracker != L"auto") {
-                    if (tracker.find_first_not_of(L"0123456789") == std::wstring::npos)
+                    const bool explicitSerial = tracker.starts_with(L"ID ");
+                    if (explicitSerial) tracker.erase(0, 3);
+                    if (!explicitSerial && tracker.find_first_not_of(L"0123456789") == std::wstring::npos)
                         next.tracker = parse<unsigned>(tracker);
                     else {
                         if (tracker.size() >= next.trackerSerial.size()) throw std::invalid_argument("Tracker serial is too long");
@@ -629,6 +646,7 @@ private:
             EnableWindow(GetDlgItem(window_, finishStick), stage == 4);
         }
         if (time - lastPaint_ >= 50) {
+            if (const auto update = bus_.readTracking()) tracking_ = *update;
             lastPaint_ = time;
             InvalidateRect(window_, nullptr, FALSE);
         }
@@ -648,6 +666,7 @@ private:
     std::filesystem::path folder_;
     Preferences prefs_{};
     Snapshot snapshot_{};
+    TrackingSnapshot tracking_{};
     Bus bus_;
     Stream stream_;
     Voice voice_;

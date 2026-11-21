@@ -101,6 +101,12 @@ int wmain(int argc, wchar_t** argv) {
         require(!isLive(*seen, Side::right, 2200), "Inactive hand stays disconnected");
         require(!isLive(*seen, Side::left, 2501), "Expired input is released");
         require(!isLive(*seen, Side::left, 1999), "Future timestamps are rejected");
+        TrackingSnapshot tracker;
+        tracker.heartbeat = 2000;
+        tracker.selected[1] = 23;
+        require(writer.publishTracking(tracker) && reader.readTracking()->selected[1] == 23
+            && trackingCurrent(tracker, 2999) && !trackingCurrent(tracker, 4000),
+            "Driver pose-source telemetry is shared and expires when the runtime stops");
 
         for (int i = 0; i < 32; ++i)
             require(reader.send({Side::right, Action::channel, i}), "Queue accepts commands");

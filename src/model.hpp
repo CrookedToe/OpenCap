@@ -107,6 +107,22 @@ struct Snapshot {
     std::array<HandSettings, handCount> settings{};
 };
 
+struct TrackerDevice {
+    std::uint32_t index{noTracker};
+    std::array<char, 100> serial{};
+};
+
+struct TrackingSnapshot {
+    Millis heartbeat{};
+    std::array<std::uint32_t, handCount> selected{noTracker, noTracker};
+    std::array<TrackerDevice, 63> devices{};
+    unsigned count{};
+};
+
+inline bool trackingCurrent(const TrackingSnapshot& status, Millis time) {
+    return status.heartbeat && time >= status.heartbeat && time - status.heartbeat < 2000;
+}
+
 enum class Action : std::uint32_t {
     startHand, fist, together, spread, cancelHand,
     joystickCenter, joystickRange, joystickFinish,

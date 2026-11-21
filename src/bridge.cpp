@@ -11,6 +11,7 @@ constexpr std::size_t queueSize = 32;
 struct SharedState {
     std::uint32_t marker{};
     Snapshot snapshot{};
+    TrackingSnapshot tracking{};
     std::size_t readPosition{};
     std::size_t count{};
     std::array<Command, queueSize> commands{};
@@ -93,6 +94,19 @@ std::optional<Snapshot> Bus::read(unsigned waitMs) const {
     const Lock lock(impl_->mutex, waitMs);
     if (!impl_->validate(lock)) return std::nullopt;
     return impl_->state->snapshot;
+}
+
+bool Bus::publishTracking(const TrackingSnapshot& snapshot) {
+    const Lock lock(impl_->mutex, 0);
+    if (!impl_->validate(lock)) return false;
+    impl_->state->tracking = snapshot;
+    return true;
+}
+
+std::optional<TrackingSnapshot> Bus::readTracking() const {
+    const Lock lock(impl_->mutex, 0);
+    if (!impl_->validate(lock)) return std::nullopt;
+    return impl_->state->tracking;
 }
 
 bool Bus::send(const Command& command) {

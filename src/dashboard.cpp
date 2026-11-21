@@ -158,6 +158,7 @@ public:
         auto lastPaint = now();
         while (true) {
             if (const auto update = bus_.read(1)) snapshot_ = *update;
+            if (const auto update = bus_.readTracking()) tracking_ = *update;
             vr::VREvent_t event{};
             while (overlay_->PollNextOverlayEvent(main_, &event, sizeof(event))) {
                 if (event.eventType == vr::VREvent_Quit) return 0;
@@ -219,6 +220,10 @@ private:
             const auto label = std::format(L"{}  ·  {}", i ? L"Right" : L"Left", connected ? L"Live" : L"Offline");
             canvas_.label(i ? rightButton : leftButton, label, true, i == side_);
         }
+        if (trackingCurrent(tracking_, time)) {
+            const auto tracker = tracking_.selected[side_];
+            canvas_.text(543, 109, tracker == noTracker ? L"No pose source" : std::format(L"Pose source  #{}", tracker), muted);
+        }
         if (active) {
             const auto battery = hand.battery >= 0 ? std::format(L"{:.0f}%", 100 * hand.battery) : L"—";
             const auto signal = hand.signal ? std::format(L"{} dBm", hand.signal) : L"—";
@@ -257,6 +262,7 @@ private:
     Canvas canvas_;
     Bus bus_;
     Snapshot snapshot_{};
+    TrackingSnapshot tracking_{};
     std::size_t side_{};
     std::size_t preset_{};
     int axis_{};

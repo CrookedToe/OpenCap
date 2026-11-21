@@ -8,7 +8,7 @@
 
 namespace opencap {
 Millis now();
-inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v7";
+inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v8";
 
 class Bus {
 public:
@@ -21,6 +21,8 @@ public:
     bool reset();
     bool publish(const Snapshot& snapshot);
     std::optional<Snapshot> read(unsigned waitMs = 0) const;
+    bool publishTracking(const TrackingSnapshot& snapshot);
+    std::optional<TrackingSnapshot> readTracking() const;
     bool send(const Command& command);
     std::optional<Command> next();
 

@@ -66,13 +66,12 @@ Quaternion matrixRotation(const HmdMatrix34_t& pose) {
     return normalize({v[0], v[1], v[2], (m[k][j] - m[j][k])/scale});
 }
 
-bool usableTracker(TrackedDeviceIndex_t index, const TrackedDevicePose_t& pose) {
-    if (!pose.bDeviceIsConnected || !pose.bPoseIsValid) return false;
+bool trackerSerial(TrackedDeviceIndex_t index, char (&serial)[128]) {
     const auto properties = VRProperties()->TrackedDeviceToPropertyContainer(index);
     const auto type = VRProperties()->GetInt32Property(properties, Prop_DeviceClass_Int32);
     if (type != TrackedDeviceClass_Controller && type != TrackedDeviceClass_GenericTracker) return false;
-    char serial[128]{};
     VRProperties()->GetStringProperty(properties, Prop_SerialNumber_String, serial, sizeof(serial));
+    serial[sizeof(serial) - 1] = '\0';
     return std::strcmp(serial, serials[0]) && std::strcmp(serial, serials[1]);
 }
 
@@ -80,16 +79,17 @@ using Poses = std::array<TrackedDevicePose_t, k_unMaxTrackedDeviceCount>;
 
 TrackedDeviceIndex_t findTracker(Side side, const HandSettings& settings, const Poses& poses) {
     if (settings.tracker != noTracker) {
-        return settings.tracker < poses.size() && usableTracker(settings.tracker, poses[settings.tracker])
-            ? settings.tracker : k_unTrackedDeviceIndexInvalid;
+        const auto index = settings.tracker;
+        char serial[128]{};
+        return index < poses.size() && poses[index].bDeviceIsConnected && poses[index].bPoseIsValid &&
+               trackerSerial(index, serial) ? index : k_unTrackedDeviceIndexInvalid;
     }
     const auto wanted = side == Side::left ? TrackedControllerRole_LeftHand : TrackedControllerRole_RightHand;
     for (TrackedDeviceIndex_t i = 1; i < poses.size(); ++i) {
-        if (!usableTracker(i, poses[i])) continue;
+        char serial[128]{};
+        if (!poses[i].bDeviceIsConnected || !poses[i].bPoseIsValid || !trackerSerial(i, serial)) continue;
         const auto properties = VRProperties()->TrackedDeviceToPropertyContainer(i);
         if (settings.trackerSerial[0]) {
-            char serial[128]{};
-            VRProperties()->GetStringProperty(properties, Prop_SerialNumber_String, serial, sizeof(serial));
             if (std::strcmp(serial, settings.trackerSerial.data()) == 0) return i;
         } else if (VRProperties()->GetInt32Property(properties, Prop_ControllerRoleHint_Int32) == wanted) {
             return i;
@@ -98,14 +98,13 @@ TrackedDeviceIndex_t findTracker(Side side, const HandSettings& settings, const 
     return k_unTrackedDeviceIndexInvalid;
 }
 
-DriverPose_t makePose(Side side, const HandSettings& settings, bool connected, const Poses& poses) {
+DriverPose_t makePose(TrackedDeviceIndex_t index, const HandSettings& settings, bool connected, const Poses& poses) {
     DriverPose_t output{};
     output.qWorldFromDriverRotation.w = output.qDriverFromHeadRotation.w = output.qRotation.w = 1;
     output.deviceIsConnected = connected;
     output.poseTimeOffset = settings.poseTimeOffset;
     output.result = connected ? TrackingResult_Running_OutOfRange : TrackingResult_Uninitialized;
     if (!connected) return output;
-    const auto index = findTracker(side, settings, poses);
     if (index == k_unTrackedDeviceIndexInvalid) return output;
     const auto& tracker = poses[index];
     const auto& matrix = tracker.mDeviceToAbsoluteTracking;
@@ -177,10 +176,10 @@ public:
     }
 
     bool registered{};
-    void update(const Hand& hand, const HandSettings& settings, bool live, const Poses& poses) {
+    void update(const Hand& hand, const HandSettings& settings, bool live, const Poses& poses, TrackedDeviceIndex_t source) {
         if (index_ == k_unTrackedDeviceIndexInvalid) return;
         const auto connected = live && settings.enabled;
-        const auto pose = makePose(side_, settings, connected, poses);
+        const auto pose = makePose(source, settings, connected, poses);
         {
             std::lock_guard lock(poseMutex_);
             lastPose_ = pose;
@@ -258,6 +257,7 @@ public:
 
     void Cleanup() override {
         for (auto& glove : gloves_) glove.reset();
+        if (bus_) bus_->publishTracking({});
         bus_.reset();
         VR_CLEANUP_SERVER_DRIVER_CONTEXT();
     }
@@ -271,16 +271,19 @@ public:
         Poses poses{};
         VRServerDriverHost()->GetRawTrackedDevicePoses(0, poses.data(), static_cast<uint32_t>(poses.size()));
         const auto time = now();
+        auto tracking = std::array<std::uint32_t, handCount>{};
         for (std::size_t i = 0; i < gloves_.size(); ++i) {
             const auto side = static_cast<Side>(i);
+            tracking[i] = findTracker(side, snapshot_.settings[i], poses);
             const bool active = isLive(snapshot_, side, time);
             if (active && snapshot_.settings[i].enabled && !gloves_[i]) {
                 auto device = std::make_unique<Glove>(side);
                 if (VRServerDriverHost()->TrackedDeviceAdded(device->serial(), TrackedDeviceClass_Controller, device.get()))
                     gloves_[i] = std::move(device);
             }
-            if (gloves_[i]) gloves_[i]->update(snapshot_.hands[i], snapshot_.settings[i], active, poses);
+            if (gloves_[i]) gloves_[i]->update(snapshot_.hands[i], snapshot_.settings[i], active, poses, tracking[i]);
         }
+        if (time - lastTrackingUpdate_ >= 250) publishTracking(poses, tracking, time);
         VREvent_t event{};
         while (VRServerDriverHost()->PollNextEvent(&event, sizeof(event))) {
             if (event.eventType != VREvent_Input_HapticVibration) continue;
@@ -293,9 +296,24 @@ public:
     }
 
 private:
+    void publishTracking(const Poses& poses, const std::array<std::uint32_t, handCount>& selected, Millis time) {
+        TrackingSnapshot status;
+        status.heartbeat = time;
+        status.selected = selected;
+        for (TrackedDeviceIndex_t i = 1; i < poses.size() && status.count < status.devices.size(); ++i) {
+            char serial[128]{};
+            if (!poses[i].bDeviceIsConnected || !trackerSerial(i, serial) || !serial[0]) continue;
+            auto& entry = status.devices[status.count++];
+            entry.index = i;
+            std::copy_n(serial, (std::min)(std::strlen(serial), entry.serial.size() - 1), entry.serial.data());
+        }
+        if (bus_->publishTracking(status)) lastTrackingUpdate_ = time;
+    }
+
     std::unique_ptr<Bus> bus_;
     Snapshot snapshot_{};
     std::array<std::unique_ptr<Glove>, handCount> gloves_;
+    Millis lastTrackingUpdate_{};
 };
 
 Provider provider;

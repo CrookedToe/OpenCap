@@ -33,7 +33,7 @@ The import covers joystick center, range and dead zone, trigger, grip and trackp
 
 Use **Controller** to set per-hand button assignments and touch and click thresholds, **Joint correction** for finger adjustments, and **Open hand viewer** for an orbitable model and live joint data. Enable **Hold stick to toggle joystick** to use the five-second shortcut while wearing the gloves. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
 
-The tracker presets apply starting offsets for VIVE Tracker, Tundra Tracker, Quest controller, or VIVE Ultimate Tracker. They preserve your tracker assignments. You can select the same presets in the SteamVR dashboard.
+The tracker presets apply starting offsets for VIVE Tracker, Tundra Tracker, Quest controller, or VIVE Ultimate Tracker. They preserve your tracker assignments. With SteamVR and the OpenCap driver running, the Tracker ID menu lists connected controllers and trackers by serial. The desktop and dashboard show the active pose source.
 
 After completing hand calibration, the hand viewer's data mode shows the measured span for each of the 12 sensor channels. It highlights channels whose span was below 10 counts. **Inspect firmware image** reads the version and checks the payload hash of a UDCAP MCUboot file. Firmware transfers and recovery are tracked in [issue #4](https://github.com/CrookedToe/OpenCap/issues/4).
 

@@ -55,7 +55,7 @@ void drawHand(HDC dc, const Hand& hand, bool active) {
 }
 
 void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
-                  const Snapshot& snapshot, std::size_t side, const std::wstring& status) {
+                  const Snapshot& snapshot, const TrackingSnapshot& tracking, std::size_t side, const std::wstring& status) {
     PAINTSTRUCT paint{};
     const auto target = BeginPaint(window, &paint);
     const auto dc = CreateCompatibleDC(target);
@@ -82,6 +82,11 @@ void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
     const auto& hand = snapshot.hands[side];
     const auto active = isLive(snapshot, static_cast<Side>(side), now());
     text(dc, 30, 211, L"LIVE HAND", accent);
+    if (trackingCurrent(tracking, now())) {
+        const auto tracker = tracking.selected[side];
+        text(dc, 30, 237, tracker == noTracker ? L"No active SteamVR pose source"
+            : std::format(L"SteamVR pose source  #{}", tracker));
+    }
     drawHand(dc, hand, active);
     text(dc, 30, 476, std::format(L"Trigger {:.0f}%   Grip {:.0f}%   Trackpad {:.0f}%",
          100*hand.trigger, 100*hand.grip, 100*hand.pad));
