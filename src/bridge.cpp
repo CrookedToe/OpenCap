@@ -74,6 +74,14 @@ Bus::~Bus() = default;
 
 bool Bus::valid() const { return impl_->state != nullptr; }
 
+bool Bus::reset() {
+    const Lock lock(impl_->mutex, 100);
+    if (!impl_->validate(lock)) return false;
+    *impl_->state = SharedState{};
+    impl_->state->marker = magic;
+    return true;
+}
+
 bool Bus::publish(const Snapshot& snapshot) {
     const Lock lock(impl_->mutex, 5);
     if (!impl_->validate(lock)) return false;

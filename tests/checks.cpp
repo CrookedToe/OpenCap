@@ -2,6 +2,7 @@
 #include "osc_compat.hpp"
 
 #include <windows.h>
+#include <openvr_driver.h>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -12,8 +13,77 @@ static void require(bool result, const char* description) {
     if (!result) throw std::runtime_error(description);
 }
 
-int main() {
+static void checkDriver(const wchar_t* path) {
+    const auto library = LoadLibraryW(path);
+    require(library != nullptr, "Load the built SteamVR driver");
+    using Factory = void* (*)(const char*, int*);
+    const auto factory = reinterpret_cast<Factory>(GetProcAddress(library, "HmdDriverFactory"));
+    const bool exported = factory != nullptr;
+    int code = 0;
+    const bool rejects = exported && !factory("invalid", &code) && code == vr::VRInitError_Init_InterfaceNotFound;
+    const bool accepts = exported && factory(vr::IServerTrackedDeviceProvider_Version, &code) && code == vr::VRInitError_None;
+    FreeLibrary(library);
+    require(accepts && rejects, "Driver exports the SteamVR factory and validates the interface");
+}
+
+class TestDesktop {
+public:
+    explicit TestDesktop(const wchar_t* path) {
+        auto arguments = L"\"" + std::wstring(path) + L"\" --demo --test-session " + id();
+        STARTUPINFOW start{};
+        start.cb = sizeof(start);
+        start.dwFlags = STARTF_USESHOWWINDOW;
+        start.wShowWindow = SW_HIDE;
+        require(CreateProcessW(path, arguments.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &start, &process_) != FALSE, "Start the isolated desktop demo");
+    }
+
+    static std::wstring id() { return std::to_wstring(GetCurrentProcessId()); }
+
+    ~TestDesktop() {
+        EnumThreadWindows(process_.dwThreadId, closeWindow, 0);
+        if (WaitForSingleObject(process_.hProcess, 2000) == WAIT_TIMEOUT) TerminateProcess(process_.hProcess, 1);
+        CloseHandle(process_.hThread);
+        CloseHandle(process_.hProcess);
+    }
+
+private:
+    static BOOL CALLBACK closeWindow(HWND window, LPARAM) {
+        PostMessageW(window, WM_CLOSE, 0, 0);
+        return TRUE;
+    }
+    PROCESS_INFORMATION process_{};
+};
+
+static void checkDemo(const wchar_t* path) {
+    const TestDesktop app(path);
+    Bus bus(std::wstring(sessionName) + L".Checks." + app.id());
+    const auto waitFor = [&](const auto& condition) {
+        const auto deadline = now() + 3000;
+        do {
+            if (const auto sample = bus.read(10); sample && condition(*sample)) return true;
+            Sleep(20);
+        } while (now() < deadline);
+        return false;
+    };
+    require(waitFor([](const auto& sample) {
+        const auto t = now();
+        return sample.demo && isLive(sample, Side::left, t) && isLive(sample, Side::right, t);
+    }), "Desktop publishes two simulated gloves");
+
+    const std::array steps{Action::startHand, Action::fist, Action::together, Action::spread};
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        require(bus.send({Side::right, steps[i]}), "Send a calibration command to the desktop");
+        require(waitFor([i](const auto& sample) {
+            return sample.hands[1].calibrationStep == (i + 1) % 4 && sample.hands[0].calibrationStep == 0;
+        }), "Calibration advances on the requested hand");
+    }
+}
+
+int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring_view(argv[1]) == L"--driver") { checkDriver(argv[2]); return 0; }
+        if (argc == 3 && std::wstring_view(argv[1]) == L"--desktop") { checkDemo(argv[2]); return 0; }
         const auto name = L"Local\\OpenCap.Checks." + std::to_wstring(GetCurrentProcessId());
         Bus writer(name), reader(name);
         require(writer.valid() && reader.valid(), "Create shared session");
@@ -37,10 +107,15 @@ int main() {
         require(!writer.next(), "Consumed commands are not repeated");
         require(reader.send({Side::left, Action::toggleStick}), "Queue can wrap");
         require(writer.next()->action == Action::toggleStick, "Wrapped command is readable");
+        require(reader.send({Side::left, Action::startHand}) && writer.reset(), "Restart the desktop session");
+        require(!writer.next() && reader.read(100)->heartbeat == 0, "Restart clears commands and stale input");
 
         const auto point = rotate(eulerDegrees({0, 0, 90}), {1, 0, 0});
         require(std::abs(point.x) < 1e-5f && std::abs(point.y - 1) < 1e-5f, "Rotation is right-handed");
         require(normalize({0, 0, 0, 0}).w == 1.0f, "Invalid quaternion resets to identity");
+        const ButtonMap mapping{1, 0, disabledButton, 3};
+        require(remapButtons(bit(Button::a) | bit(Button::system) | bit(Button::grip), mapping)
+                    == (bit(Button::b) | bit(Button::grip)), "Input mapping swaps and disables selected outputs");
         require(avatarBits(.5f) == 2 && avatarBits(.25f) == 4 && avatarBits(.1f) == 10,
                 "Avatar bits select the nearest reciprocal");
         Snapshot avatar;

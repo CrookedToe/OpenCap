@@ -13,7 +13,7 @@ ctest --test-dir build -C Release --output-on-failure
 cmake --install build --config Release --prefix out/OpenCap
 ```
 
-Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-DOPENVR_SDK_ROOT=C:\path\to\openvr` to build against an existing SDK checkout. Start `OpenCap.exe --demo` to exercise the desktop and shared commands with simulated data. Settings are stored under `%LOCALAPPDATA%\OpenCap`.
+Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-DOPENVR_SDK_ROOT=C:\path\to\openvr` to build against an existing SDK checkout. Start `OpenCap.exe --demo` to exercise the desktop and shared commands with simulated data. Settings are stored under `%LOCALAPPDATA%\OpenCap`, with separate settings for demo mode.
 
 ## Try with SteamVR
 
@@ -21,7 +21,9 @@ Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-D
 2. Start `OpenCap.exe`. Power on the gloves, then run the three-pose calibration for each hand. Use **Set joystick center** with the stick released, then rotate the stick and select **Finish joystick range**.
 3. With SteamVR stopped, run `out/OpenCap/Set-SteamVRRegistration.ps1 -InstallPath out/OpenCap`. In SteamVR's add-on settings, disable the UDCAP add-on before using OpenCap to avoid duplicate controllers.
 4. Start SteamVR. Use **Open in SteamVR** to make the dashboard available. To register it for future sessions, run the registration script with `-Dashboard` while SteamVR is running.
-5. Assign a tracker to each hand in SteamVR or enter a device index in OpenCap. Position offsets are in metres and rotation offsets are in degrees.
+5. Assign a tracker to each hand in SteamVR or enter a tracker serial or device index in OpenCap. Position offsets are in metres and rotation offsets are in degrees.
+
+Use **Map inputs** for per-hand button assignments and **Open hand viewer** for an orbitable hand model and live joint data. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 

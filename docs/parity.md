@@ -7,10 +7,10 @@ The Windows reference installation identifies its desktop executable and assembl
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
 | Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and channel scan |
-| Calibration | Three-pose captures, joystick center and range, saved glove calibration, power-button and F1 entry | Physical pose comparisons, guided timing and voice prompts, calibration quality and export format |
-| Desktop | Live hand diagram and controller readings, device toggles, tracker offsets, CSV sample export | Detachable 3D viewer, preset tracking profiles, controller mapping, gestures, per-joint tuning and localization |
+| Calibration | Three-pose captures, joystick center and range, saved glove calibration, and timed voice-guided calibration from F1 or the glove power button | Physical pose comparisons, guide timing, calibration quality and export format |
+| Desktop | Live hand and data viewers, controller readings and digital remapping, device toggles, tracker IDs and offsets, CSV sample export | Preset tracking profiles, full gesture and analog mapping, per-joint tuning and localization |
 | Streaming | Configurable VMC finger rotations and UDCAP VRChat OSC parameters | Verify VMC coordinates and exercise avatar output with live gloves |
-| SteamVR driver | OpenVR provider, controller input, 31-bone curl/splay model, tracker transforms and haptic routing | Runtime and game bindings, pose alignment, independent joint articulation and device priority behavior |
+| SteamVR driver | OpenVR provider, controller input, 31-bone curl/splay model, tracker transforms, controller priority and haptic routing | Runtime and game bindings, pose alignment, independent joint articulation and device priority behavior |
 | SteamVR dashboard | Device status, calibration controls, joystick toggle, vibration test and tracker offsets | In-headset controls, overlay startup and the full first-party dashboard inventory |
 | Firmware and distribution | Firmware version display, reversible SteamVR registration script | Firmware update and recovery, updater and installer, hardware and runtime regression checks |
 

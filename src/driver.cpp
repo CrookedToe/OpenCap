@@ -75,9 +75,14 @@ TrackedDeviceIndex_t findTracker(Side side, const HandSettings& settings, const 
     const auto wanted = side == Side::left ? TrackedControllerRole_LeftHand : TrackedControllerRole_RightHand;
     for (TrackedDeviceIndex_t i = 1; i < poses.size(); ++i) {
         if (!usableTracker(i, poses[i])) continue;
-        const auto role = VRProperties()->GetInt32Property(VRProperties()->TrackedDeviceToPropertyContainer(i),
-                                                           Prop_ControllerRoleHint_Int32);
-        if (role == wanted) return i;
+        const auto properties = VRProperties()->TrackedDeviceToPropertyContainer(i);
+        if (settings.trackerSerial[0]) {
+            char serial[128]{};
+            VRProperties()->GetStringProperty(properties, Prop_SerialNumber_String, serial, sizeof(serial));
+            if (std::strcmp(serial, settings.trackerSerial.data()) == 0) return i;
+        } else if (VRProperties()->GetInt32Property(properties, Prop_ControllerRoleHint_Int32) == wanted) {
+            return i;
+        }
     }
     return k_unTrackedDeviceIndexInvalid;
 }
@@ -169,13 +174,18 @@ public:
             lastPose_ = pose;
         }
         VRServerDriverHost()->TrackedDevicePoseUpdated(index_, pose, sizeof(pose));
+        if (highPriority_ != settings.highPriority) {
+            highPriority_ = settings.highPriority;
+            VRProperties()->SetInt32Property(props_, Prop_ControllerHandSelectionPriority_Int32, highPriority_ ? 100 : 0);
+        }
         if (!connected && !previouslyConnected_) return;
         previouslyConnected_ = connected;
         const Hand data = connected ? hand : Hand{};
+        const auto mapped = remapButtons(data.buttons, settings.buttonMap);
         const auto input = VRDriverInput();
         for (std::size_t i = 0; i < buttons_.size(); ++i) {
             const auto button = booleanInputs[i].button;
-            const bool pressed = (button != Button::stick || settings.joystick) && (data.buttons & bit(button));
+            const bool pressed = (button != Button::stick || settings.joystick) && (mapped & bit(button));
             if (buttons_[i]) input->UpdateBooleanComponent(buttons_[i], pressed, 0);
         }
         for (std::size_t i = 0; i < axes_.size(); ++i) {
@@ -231,6 +241,7 @@ private:
     DriverPose_t lastPose_{};
     float battery_{-1};
     bool previouslyConnected_{};
+    bool highPriority_{};
 };
 
 class Provider final : public IServerTrackedDeviceProvider {

@@ -1,4 +1,6 @@
 #include "bridge.hpp"
+#include "hand_view.hpp"
+#include "input_dialog.hpp"
 #include "stream.hpp"
 #ifdef OPENCAP_RECEIVER
 #include "receiver.hpp"
@@ -8,6 +10,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <sapi.h>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -30,7 +33,7 @@ enum Control {
     leftHand = 100, rightHand, nextPose, cancelPose, centerStick, finishStick, pair,
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
-    applyStream, saveCsv, dashboard, globalHotkey
+    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap
 };
 
 struct Preferences {
@@ -45,12 +48,13 @@ std::filesystem::path executableFolder() {
     return std::filesystem::path(path).parent_path();
 }
 
-std::filesystem::path configFolder() {
+std::filesystem::path configFolder(bool demo) {
     PWSTR path = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path))) return {};
     std::filesystem::path folder(path);
     CoTaskMemFree(path);
     folder /= L"OpenCap";
+    if (demo) folder /= L"Demo";
     std::error_code error;
     std::filesystem::create_directories(folder, error);
     return error ? std::filesystem::path{} : folder;
@@ -70,12 +74,20 @@ Preferences loadSettings(const std::filesystem::path& path) {
     std::ifstream input(path / "settings.txt");
     input.imbue(std::locale::classic());
     int version = 0;
-    if (!(input >> version) || version != 1) return {};
+    if (!(input >> version) || (version != 1 && version != 2)) return {};
     for (auto& hand : settings.hands) {
         auto& p = hand.position;
         auto& r = hand.rotation;
         if (!(input >> hand.tracker >> p.x >> p.y >> p.z >> r.x >> r.y >> r.z
                     >> hand.enabled >> hand.joystick >> hand.haptics) || !validPose(hand)) return {};
+        if (version == 2) {
+            std::string serial;
+            if (!(input >> hand.highPriority >> std::quoted(serial)) || serial.size() >= hand.trackerSerial.size())
+                return {};
+            std::copy(serial.begin(), serial.end(), hand.trackerSerial.begin());
+            for (auto& mapping : hand.buttonMap)
+                if (!(input >> mapping) || mapping > disabledButton) return {};
+        }
     }
     auto& s = settings.stream;
     if (!(input >> std::quoted(s.address) >> s.vmcPort >> s.oscPort >> settings.hotkey)
@@ -89,12 +101,15 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
     {
         std::ofstream output(tmp, std::ios::trunc);
         output.imbue(std::locale::classic());
-        output << "1\n" << std::setprecision(8);
+        output << "2\n" << std::setprecision(8);
         for (const auto& hand : settings.hands) {
             const auto p = hand.position, r = hand.rotation;
             output << hand.tracker << ' ' << p.x << ' ' << p.y << ' ' << p.z << ' '
                    << r.x << ' ' << r.y << ' ' << r.z << ' '
-                   << hand.enabled << ' ' << hand.joystick << ' ' << hand.haptics << '\n';
+                   << hand.enabled << ' ' << hand.joystick << ' ' << hand.haptics << ' '
+                   << hand.highPriority << ' ' << std::quoted(hand.trackerSerial.data());
+            for (const auto mapping : hand.buttonMap) output << ' ' << mapping;
+            output << '\n';
         }
         const auto& s = settings.stream;
         output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey << '\n';
@@ -126,10 +141,35 @@ constexpr std::array calibration{
     CalibrationControl{L"Capture fingers spread", Action::spread},
     CalibrationControl{L"Finish joystick range first", Action::startHand}
 };
+constexpr std::array guidance{L"Make a fist.", L"Straighten your fingers and bring them together.",
+                              L"Spread your fingers apart."};
+
+class Voice {
+public:
+    explicit Voice(bool enabled) {
+        if (!enabled) return;
+        initialized_ = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+        if (initialized_)
+            CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&voice_));
+    }
+    ~Voice() {
+        if (voice_) voice_->Release();
+        if (initialized_) CoUninitialize();
+    }
+    void say(const wchar_t* words) const {
+        if (voice_) voice_->Speak(words, SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
+    }
+private:
+    bool initialized_{};
+    ISpVoice* voice_{};
+};
 
 class Desktop {
 public:
-    explicit Desktop(bool demo) : demo_(demo), folder_(configFolder()), prefs_(loadSettings(folder_)) {
+    Desktop(bool demo, const std::wstring& session, bool isolated)
+        : demo_(demo), folder_(isolated ? std::filesystem::path{} : configFolder(demo)),
+          prefs_(loadSettings(folder_)), bus_(session), voice_(!isolated) {
+        if (!bus_.reset()) throw std::runtime_error("Could not initialize the OpenCap session.");
         snapshot_.demo = demo_;
         snapshot_.settings = prefs_.hands;
         if (!stream_.configure(prefs_.stream)) {
@@ -167,7 +207,7 @@ public:
         ShowWindow(window_, view);
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-            if (msg.message == WM_KEYDOWN && msg.wParam == VK_F1) send(Action::startHand);
+            if (msg.message == WM_KEYDOWN && msg.wParam == VK_F1) startQuick((1u << handCount) - 1);
             else if (!IsDialogMessageW(window_, &msg)) {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -194,7 +234,7 @@ private:
             if (HIWORD(wParam) == BN_CLICKED) click(LOWORD(wParam));
             return 0;
         case WM_TIMER: tick(); return 0;
-        case WM_HOTKEY: if (wParam == 1) send(Action::startHand); return 0;
+        case WM_HOTKEY: if (wParam == 1) startQuick((1u << handCount) - 1); return 0;
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
         case WM_DESTROY:
@@ -243,12 +283,15 @@ private:
         button(useHand, L"Publish to SteamVR", 422, 400, 172, BS_AUTOCHECKBOX);
         button(useJoystick, L"Joystick", 600, 400, 110, BS_AUTOCHECKBOX);
         button(useHaptics, L"Vibration", 729, 400, 133, BS_AUTOCHECKBOX);
-        edit(trackerNum, 422, 497, 54);
-        edit(posX, 484, 497, 58); edit(posY, 550, 497, 58); edit(posZ, 616, 497, 58);
-        edit(rotX, 682, 497, 58); edit(rotY, 748, 497, 58); edit(rotZ, 814, 497, 58);
+        button(inputMapping, L"Map inputs…", 755, 444, 134);
+        edit(trackerNum, 422, 497, 110);
+        edit(posX, 538, 497, 50); edit(posY, 595, 497, 51); edit(posZ, 652, 497, 50);
+        edit(rotX, 709, 497, 52); edit(rotY, 767, 497, 53); edit(rotZ, 827, 497, 53);
         button(applyPose, L"Apply tracker alignment", 422, 531, 228);
         button(saveCsv, L"Export hand sample", 30, 528, 181);
+        button(handView, L"Open hand viewer", 223, 528, 170);
         button(globalHotkey, L"F1 quick calibration", 662, 531, 227, BS_AUTOCHECKBOX);
+        button(preferOpenCap, L"Prefer OpenCap in SteamVR", 662, 567, 227, BS_AUTOCHECKBOX);
         edit(udpIp, 30, 654, 183);
         edit(vmcPort, 226, 654, 93);
         edit(oscPort, 332, 654, 93);
@@ -270,7 +313,10 @@ private:
         CheckDlgButton(window_, useHand, h.enabled ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useJoystick, h.joystick ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useHaptics, h.haptics ? BST_CHECKED : BST_UNCHECKED);
-        SetDlgItemTextW(window_, trackerNum, h.tracker == noTracker ? L"Auto" : std::to_wstring(h.tracker).c_str());
+        CheckDlgButton(window_, preferOpenCap, h.highPriority ? BST_CHECKED : BST_UNCHECKED);
+        const auto trackerText = h.trackerSerial[0] ? widen(h.trackerSerial.data())
+            : h.tracker == noTracker ? L"Auto" : std::to_wstring(h.tracker);
+        SetDlgItemTextW(window_, trackerNum, trackerText.c_str());
         for (const auto [id, value] : std::array{
             std::pair{posX, h.position.x}, std::pair{posY, h.position.y}, std::pair{posZ, h.position.z},
             std::pair{rotX, h.rotation.x}, std::pair{rotY, h.rotation.y}, std::pair{rotZ, h.rotation.z}}) {
@@ -306,9 +352,9 @@ private:
         case leftHand: select(0); break;
         case rightHand: select(1); break;
         case nextPose:
-            if (hand.calibrationStep < 4) send(calibration[hand.calibrationStep].action);
+            if (!quickMask_ && hand.calibrationStep < 4) send(calibration[hand.calibrationStep].action);
             break;
-        case cancelPose: send(Action::cancelHand); break;
+        case cancelPose: if (quickMask_) stopQuick(); else send(Action::cancelHand); break;
         case centerStick: send(Action::joystickCenter); break;
         case finishStick: send(Action::joystickFinish); break;
         case pair: send(Action::pairStart); break;
@@ -325,17 +371,36 @@ private:
         case useHand: settings.enabled = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
         case useJoystick: settings.joystick = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
         case useHaptics: settings.haptics = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
+        case preferOpenCap: settings.highPriority = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
+        case inputMapping:
+            if (const auto mapping = editInputs(window_, settings.buttonMap)) {
+                settings.buttonMap = *mapping;
+                save();
+            }
+            break;
         case applyPose:
             try {
                 auto next = settings;
                 const auto tracker = field(trackerNum);
-                next.tracker = tracker == L"Auto" || tracker == L"auto" ? noTracker : parse<unsigned>(tracker);
+                next.tracker = noTracker;
+                next.trackerSerial.fill(0);
+                if (!tracker.empty() && tracker != L"Auto" && tracker != L"auto") {
+                    if (tracker.find_first_not_of(L"0123456789") == std::wstring::npos)
+                        next.tracker = parse<unsigned>(tracker);
+                    else {
+                        if (tracker.size() >= next.trackerSerial.size()) throw std::invalid_argument("Tracker serial is too long");
+                        for (std::size_t i = 0; i < tracker.size(); ++i) {
+                            if (tracker[i] < 32 || tracker[i] > 126) throw std::invalid_argument("Invalid tracker serial");
+                            next.trackerSerial[i] = static_cast<char>(tracker[i]);
+                        }
+                    }
+                }
                 next.position = {parse<float>(field(posX)), parse<float>(field(posY)), parse<float>(field(posZ))};
                 next.rotation = {parse<float>(field(rotX)), parse<float>(field(rotY)), parse<float>(field(rotZ))};
                 if (!validPose(next)) throw std::invalid_argument("Pose out of range");
                 settings = next;
                 save();
-            } catch (const std::exception&) { status_ = L"Enter Auto or a device index from 1 to 63 and valid offsets."; }
+            } catch (const std::exception&) { status_ = L"Enter Auto, a tracker serial, or a device index from 1 to 63, and valid offsets."; }
             break;
         case applyStream:
             try {
@@ -365,6 +430,9 @@ private:
             save();
             break;
         case saveCsv: exportCsv(); break;
+        case handView:
+            if (!openHandView(window_, static_cast<unsigned>(side_))) status_ = L"Could not open the hand viewer.";
+            break;
         case dashboard: {
             const auto exe = executableFolder() / "OpenCapDashboard.exe";
             const auto rc = ShellExecuteW(window_, L"open", exe.c_str(), nullptr, exe.parent_path().c_str(), SW_SHOWNORMAL);
@@ -377,6 +445,64 @@ private:
     void send(Action action, int value = 0, float duration = 0, float amplitude = 0) {
         if (!bus_.send({static_cast<Side>(side_), action, value, duration, amplitude}))
             status_ = L"The command queue is busy.";
+    }
+
+    void startQuick(unsigned requested) {
+        if (quickMask_) return;
+        const auto time = now();
+        for (std::size_t i = 0; i < handCount; ++i) {
+            const auto bit = 1u << i;
+            const auto side = static_cast<Side>(i);
+            if ((requested & bit) && isLive(snapshot_, side, time) && snapshot_.hands[i].calibrationStep == 0
+                && bus_.send({side, Action::startHand})) quickMask_ |= bit;
+        }
+        if (!quickMask_) {
+            status_ = L"Connect a glove and finish any current calibration.";
+            return;
+        }
+        quickPhase_ = 1;
+        quickDeadline_ = time + 4500;
+        quickDue_ = 0;
+        status_ = L"Starting quick calibration.";
+    }
+
+    void stopQuick() {
+        for (std::size_t i = 0; i < handCount; ++i)
+            if (quickMask_ & (1u << i)) bus_.send({static_cast<Side>(i), Action::cancelHand});
+        quickMask_ = 0;
+        status_ = L"Quick calibration stopped.";
+    }
+
+    void guide(Millis time) {
+        if (!quickMask_) return;
+        bool ready = true;
+        for (std::size_t i = 0; i < handCount; ++i) {
+            if (!(quickMask_ & (1u << i))) continue;
+            if (!isLive(snapshot_, static_cast<Side>(i), time)) { stopQuick(); return; }
+            if (snapshot_.hands[i].calibrationStep != quickPhase_ % 4) ready = false;
+        }
+        if (!ready) {
+            if (time >= quickDeadline_) stopQuick();
+            return;
+        }
+        if (quickPhase_ == 4) {
+            quickMask_ = 0;
+            status_ = L"Quick calibration complete.";
+            voice_.say(L"Calibration complete.");
+            return;
+        }
+        if (!quickDue_) {
+            status_ = guidance[quickPhase_ - 1];
+            voice_.say(guidance[quickPhase_ - 1]);
+            quickDue_ = time + 3500;
+            return;
+        }
+        if (time < quickDue_) return;
+        for (std::size_t i = 0; i < handCount; ++i)
+            if (quickMask_ & (1u << i)) bus_.send({static_cast<Side>(i), calibration[quickPhase_].action});
+        ++quickPhase_;
+        quickDeadline_ = time + 4500;
+        quickDue_ = 0;
     }
 
     void tick() {
@@ -437,16 +563,17 @@ private:
                 snapshot_.hands[s].calibrationStep = demoSteps_[s];
             }
         }
-        snapshot_.heartbeat = time;
+        snapshot_.heartbeat = now();
         snapshot_.settings = prefs_.hands;
         bus_.publish(snapshot_);
         stream_.send(snapshot_);
         for (std::size_t s = 0; s < handCount; ++s) {
             const auto count = snapshot_.hands[s].calibrationRequests;
             if (count > lastRequests_[s] && snapshot_.hands[s].calibrationStep == 0)
-                bus_.send({static_cast<Side>(s), Action::startHand});
+                startQuick(1u << s);
             lastRequests_[s] = count;
         }
+        guide(snapshot_.heartbeat);
         const auto stage = snapshot_.hands[side_].calibrationStep;
         if (lastStage_ != stage) {
             lastStage_ = stage;
@@ -552,7 +679,7 @@ private:
         text(dc, 422, 208, hand.calibrated ? L"CALIBRATION  /  READY" : L"CALIBRATION", accent);
         text(dc, 422, 363, hand.channel >= 0 ? std::format(L"Channel {}", hand.channel) : L"Channel —");
         text(dc, 422, 451, L"TRACKER ALIGNMENT", accent);
-        text(dc, 422, 474, L"Index     Position X / Y / Z (m)             Rotation X / Y / Z (°)");
+        text(dc, 422, 474, L"Tracker ID      Position X / Y / Z (m)       Rotation X / Y / Z (°)");
         const auto actionText = hand.calibrationStep == 4 ? L"Move the joystick around its full range, then select Finish."
             : hand.pairing ? L"Pairing is active. Put the glove into pairing mode." : L"";
         const auto message = !status_.empty() ? status_ : hand.message[0] ? widen(hand.message.data())
@@ -578,6 +705,7 @@ private:
     Snapshot snapshot_{};
     Bus bus_;
     Stream stream_;
+    Voice voice_;
 #ifdef OPENCAP_RECEIVER
     std::unique_ptr<Receiver> receiver_;
 #endif
@@ -590,13 +718,26 @@ private:
     std::array<unsigned, handCount> demoSteps_{}, lastRequests_{};
     std::wstring status_;
     bool bothPairing_{};
+    unsigned quickMask_{}, quickPhase_{};
+    Millis quickDue_{}, quickDeadline_{};
 };
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR line, int show) {
     const auto args = std::wstring_view(line);
-    const bool demo = args == L"--demo";
-    const auto lock = CreateMutexW(nullptr, FALSE, L"Local\\OpenCap.Desktop.v1");
+    constexpr std::wstring_view testPrefix = L"--demo --test-session ";
+    const bool isolated = args.starts_with(testPrefix);
+    const auto testId = isolated ? args.substr(testPrefix.size()) : std::wstring_view{};
+    if (isolated && (testId.empty() || testId.size() > 12 ||
+        testId.find_first_not_of(L"0123456789") != std::wstring_view::npos)) return 1;
+    const bool demo = args == L"--demo" || isolated;
+    auto appLock = std::wstring(L"Local\\OpenCap.Desktop.v1");
+    auto session = std::wstring(sessionName);
+    if (isolated) {
+        appLock.append(L".Checks.").append(testId);
+        session.append(L".Checks.").append(testId);
+    }
+    const auto lock = CreateMutexW(nullptr, FALSE, appLock.c_str());
     if (!lock) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         const auto previous = FindWindowW(L"OpenCapDesktop", nullptr);
@@ -606,10 +747,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR line, int show) {
     }
     int result = 0;
     try {
-        Desktop app(demo);
+        Desktop app(demo, session, isolated);
         result = app.run(instance, show);
     } catch (const std::exception& error) {
-        MessageBoxW(nullptr, widen(error.what()).c_str(), L"OpenCap", MB_ICONERROR);
+        if (!isolated) MessageBoxW(nullptr, widen(error.what()).c_str(), L"OpenCap", MB_ICONERROR);
         result = 1;
     }
     CloseHandle(lock);

@@ -269,14 +269,15 @@ int registration(bool remove) {
 }
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR line, int) {
+    const std::wstring_view args(line);
     try {
-        const std::wstring_view args(line);
         if (args == L"--register") return registration(false);
         if (args == L"--unregister") return registration(true);
         Dashboard dashboard;
         return dashboard.run();
     } catch (const std::exception& error) {
-        MessageBoxA(nullptr, error.what(), "OpenCap Dashboard", MB_OK | MB_ICONERROR);
+        if (args == L"--register" || args == L"--unregister") OutputDebugStringA(error.what());
+        else MessageBoxA(nullptr, error.what(), "OpenCap Dashboard", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

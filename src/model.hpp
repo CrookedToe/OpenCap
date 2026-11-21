@@ -18,6 +18,8 @@ enum class Button : std::uint32_t {
 };
 
 constexpr std::uint32_t bit(Button value) { return static_cast<std::uint32_t>(value); }
+using ButtonMap = std::array<unsigned, 4>;
+constexpr unsigned disabledButton = 8;
 
 struct Vec3 { float x{}, y{}, z{}; };
 struct Quaternion { float x{}, y{}, z{}, w{1}; };
@@ -46,11 +48,14 @@ struct Hand {
 
 struct HandSettings {
     std::uint32_t tracker{noTracker};
+    std::array<char, 100> trackerSerial{};
     Vec3 position{};
     Vec3 rotation{};
+    ButtonMap buttonMap{0, 1, 2, 3};
     bool enabled{true};
     bool joystick{true};
     bool haptics{true};
+    bool highPriority{};
 };
 
 struct Snapshot {
@@ -76,6 +81,7 @@ struct Command {
 };
 
 bool isLive(const Snapshot& snapshot, Side side, Millis now);
+std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map);
 Quaternion normalize(Quaternion value);
 Quaternion multiply(Quaternion a, Quaternion b);
 Quaternion eulerDegrees(Vec3 degrees);

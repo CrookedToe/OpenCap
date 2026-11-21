@@ -4,6 +4,16 @@
 #include <numbers>
 
 namespace opencap {
+std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map) {
+    constexpr unsigned mappedMask = (1u << std::tuple_size_v<ButtonMap>) - 1;
+    auto mapped = input & ~mappedMask;
+    for (std::size_t output = 0; output < map.size(); ++output) {
+        const auto source = map[output];
+        if (source < disabledButton && input & (1u << source)) mapped |= 1u << output;
+    }
+    return mapped;
+}
+
 bool isLive(const Snapshot& snapshot, Side side, Millis now) {
     const auto& hand = snapshot.hands.at(static_cast<std::size_t>(side));
     return hand.linked && hand.lastFrame && now >= hand.lastFrame && now >= snapshot.heartbeat
