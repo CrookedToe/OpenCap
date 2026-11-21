@@ -17,6 +17,10 @@ Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-D
 
 ## Try with SteamVR
 
+OpenCap imports compatible settings from an installed UDCAP driver on the first normal launch. It layers your saved UDCAP desktop settings and the active UDCAP SteamVR settings over the installed defaults. **Import UDCAP settings** refreshes those values. Keep your existing glove pairing and power on each glove so OpenCap can apply its controller preferences.
+
+The import covers joystick center, range and dead zone, trigger, grip and trackpad settings, finger response curves, per-hand vibration, tracker offsets and priority, skeleton-only mode, and VMC and OSC destinations. Hand-pose calibration uses OpenCap's separate workflow. OpenCap stores the imported data in its own settings and glove preferences.
+
 1. Exit the UDCAP desktop app to release its receiver ports.
 2. Start `OpenCap.exe`. Power on the gloves, then run the three-pose calibration for each hand. Use **Set joystick center** with the stick released, then rotate the stick and select **Finish joystick range**.
 3. With SteamVR stopped, run `out/OpenCap/Set-SteamVRRegistration.ps1 -InstallPath out/OpenCap`. In SteamVR's add-on settings, disable the UDCAP add-on before using OpenCap to avoid duplicate controllers.

@@ -10,6 +10,7 @@ struct StreamSettings {
     std::string address{"127.0.0.1"};
     unsigned vmcPort{};
     unsigned oscPort{};
+    std::string oscAddress{"127.0.0.1"};
 };
 
 class Stream {

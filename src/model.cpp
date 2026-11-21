@@ -8,6 +8,17 @@ bool validJointOffset(Vec3 offset) {
     return std::abs(offset.x) <= 45 && std::abs(offset.y) <= 45 && std::abs(offset.z) <= 45;
 }
 
+void applyHandPreferences(Hand& hand, const HandSettings& settings) {
+    if (!settings.triggerEnabled) { hand.trigger = 0; hand.buttons &= ~bit(Button::trigger); }
+    if (!settings.gripEnabled) { hand.grip = 0; hand.buttons &= ~bit(Button::grip); }
+    if (!settings.padEnabled) { hand.pad = 0; hand.buttons &= ~bit(Button::pad); }
+    if (!settings.thumbEnabled) {
+        hand.curl[0] = 0;
+        for (const auto index : {0, 1, 2, 3, 20}) hand.angles[index] = 0;
+        for (unsigned j = 0; j < 3; ++j) hand.joints[j] = {};
+    }
+}
+
 std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map) {
     constexpr unsigned mappedMask = (1u << std::tuple_size_v<ButtonMap>) - 1;
     auto mapped = input & ~mappedMask;

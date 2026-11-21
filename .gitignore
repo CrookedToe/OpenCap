@@ -1,6 +1,7 @@
 /.opencap-git/
 /build*/
 /out/
+/OpenCap-Windows/
 /.vs/
 *.user
 *.log

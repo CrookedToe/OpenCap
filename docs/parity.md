@@ -13,6 +13,7 @@ The Windows reference installation identifies its desktop executable and assembl
 | SteamVR driver | OpenVR provider, controller input, 31-bone curl/splay model, tracker transforms, controller priority and haptic routing | Runtime and game bindings, pose alignment, independent joint articulation and device priority behavior |
 | SteamVR dashboard | Device status, calibration controls, joystick toggle, vibration test and tracker offsets | In-headset controls, overlay startup and the full first-party dashboard inventory |
 | Firmware and distribution | Firmware version display, reversible SteamVR registration script | Firmware update and recovery, updater and installer, hardware and runtime regression checks |
+| Settings migration | Layer installed desktop and driver defaults, saved desktop preferences and UDCAP SteamVR settings | Compare the imported joystick range, finger response and tracker alignment on live hardware |
 
 ## Acceptance matrix
 

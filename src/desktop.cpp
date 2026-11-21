@@ -2,6 +2,7 @@
 #include "hand_view.hpp"
 #include "input_dialog.hpp"
 #include "stream.hpp"
+#include "udcap_preferences.hpp"
 #ifdef OPENCAP_RECEIVER
 #include "receiver.hpp"
 #endif
@@ -12,6 +13,7 @@
 #include <shellapi.h>
 #include <sapi.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -33,13 +35,15 @@ enum Control {
     leftHand = 100, rightHand, nextPose, cancelPose, centerStick, finishStick, pair,
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
-    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment
+    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
+    oscIp, importUdcap
 };
 
 struct Preferences {
     std::array<HandSettings, handCount> hands{};
     StreamSettings stream{};
     bool hotkey{};
+    std::uint64_t udcapImport{};
 };
 
 std::filesystem::path executableFolder() {
@@ -74,13 +78,13 @@ Preferences loadSettings(const std::filesystem::path& path) {
     std::ifstream input(path / "settings.txt");
     input.imbue(std::locale::classic());
     int version = 0;
-    if (!(input >> version) || (version != 1 && version != 2)) return {};
+    if (!(input >> version) || version < 1 || version > 3) return {};
     for (auto& hand : settings.hands) {
         auto& p = hand.position;
         auto& r = hand.rotation;
         if (!(input >> hand.tracker >> p.x >> p.y >> p.z >> r.x >> r.y >> r.z
                     >> hand.enabled >> hand.joystick >> hand.haptics) || !validPose(hand)) return {};
-        if (version == 2) {
+        if (version >= 2) {
             std::string serial;
             if (!(input >> hand.highPriority >> std::quoted(serial)) || serial.size() >= hand.trackerSerial.size())
                 return {};
@@ -88,10 +92,15 @@ Preferences loadSettings(const std::filesystem::path& path) {
             for (auto& mapping : hand.buttonMap)
                 if (!(input >> mapping) || mapping > disabledButton) return {};
         }
+        if (version >= 3 && (!(input >> hand.triggerEnabled >> hand.gripEnabled >> hand.padEnabled >>
+            hand.thumbEnabled >> hand.skeletonOnly >> hand.poseTimeOffset) || !(std::abs(hand.poseTimeOffset) <= .25f)))
+            return {};
     }
     auto& s = settings.stream;
     if (!(input >> std::quoted(s.address) >> s.vmcPort >> s.oscPort >> settings.hotkey)
         || s.vmcPort > 65535 || s.oscPort > 65535) return {};
+    s.oscAddress = s.address;
+    if (version >= 3 && !(input >> std::quoted(s.oscAddress) >> settings.udcapImport)) return {};
     return settings;
 }
 
@@ -101,7 +110,7 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
     {
         std::ofstream output(tmp, std::ios::trunc);
         output.imbue(std::locale::classic());
-        output << "2\n" << std::setprecision(8);
+        output << "3\n" << std::setprecision(8);
         for (const auto& hand : settings.hands) {
             const auto p = hand.position, r = hand.rotation;
             output << hand.tracker << ' ' << p.x << ' ' << p.y << ' ' << p.z << ' '
@@ -109,10 +118,12 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
                    << hand.enabled << ' ' << hand.joystick << ' ' << hand.haptics << ' '
                    << hand.highPriority << ' ' << std::quoted(hand.trackerSerial.data());
             for (const auto mapping : hand.buttonMap) output << ' ' << mapping;
-            output << '\n';
+            output << ' ' << hand.triggerEnabled << ' ' << hand.gripEnabled << ' ' << hand.padEnabled << ' '
+                   << hand.thumbEnabled << ' ' << hand.skeletonOnly << ' ' << hand.poseTimeOffset << '\n';
         }
         const auto& s = settings.stream;
-        output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey << '\n';
+        output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey
+               << ' ' << std::quoted(s.oscAddress) << ' ' << settings.udcapImport << '\n';
         output.close();
         if (!output) return false;
     }
@@ -126,6 +137,12 @@ std::wstring widen(std::string_view value) {
     std::wstring out(static_cast<std::size_t>(n), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), n);
     return out;
+}
+
+std::uint64_t nextImport(std::uint64_t previous) {
+    const auto clock = std::chrono::system_clock::now().time_since_epoch();
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(clock).count();
+    return (std::max)(previous + 1, static_cast<std::uint64_t>(milliseconds));
 }
 
 constexpr std::array<const wchar_t*, handCount> sideNames{L"Left glove", L"Right glove"};
@@ -171,14 +188,23 @@ public:
           prefs_(loadSettings(folder_)), bus_(session), voice_(!isolated) {
         if (!bus_.reset()) throw std::runtime_error("Could not initialize the OpenCap session.");
         snapshot_.demo = demo_;
-        snapshot_.settings = prefs_.hands;
+        UdcapPreferences vendor;
+        if (!demo_ && !folder_.empty()) vendor = readUdcapPreferences(findUdcapSources(folder_.parent_path()));
+        const bool firstImport = vendor.found && !prefs_.udcapImport;
+        if (firstImport) {
+            applyUdcapPreferences(vendor, prefs_.hands, prefs_.stream);
+            prefs_.udcapImport = nextImport(0);
+            saveSettings(folder_, prefs_);
+        }
         if (!stream_.configure(prefs_.stream)) {
             prefs_.stream = {};
             stream_.configure(prefs_.stream);
         }
+        snapshot_.settings = prefs_.hands;
 #ifdef OPENCAP_RECEIVER
         snapshot_.receiverSupported = true;
-        if (!demo_ && !folder_.empty()) receiver_ = std::make_unique<Receiver>(folder_ / "Gloves");
+        if (!demo_ && !folder_.empty())
+            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver), prefs_.udcapImport);
 #endif
     }
 
@@ -270,6 +296,7 @@ private:
         button(leftHand, L"Left glove", 30, 161, 130, BS_AUTORADIOBUTTON | WS_GROUP);
         button(rightHand, L"Right glove", 170, 161, 130, BS_AUTORADIOBUTTON);
         button(dashboard, L"Open in SteamVR", 707, 27, 182);
+        if (!demo_) button(importUdcap, L"Import UDCAP settings", 494, 27, 201);
         button(nextPose, calibration[0].label, 422, 235, 228, WS_GROUP | BS_PUSHBUTTON);
         button(cancelPose, L"Cancel", 662, 235, 103);
         button(centerStick, L"Set joystick center", 422, 272, 228);
@@ -293,13 +320,12 @@ private:
         button(jointAdjustment, L"Joint correction…", 223, 205, 170);
         button(globalHotkey, L"F1 quick calibration", 662, 531, 227, BS_AUTOCHECKBOX);
         button(preferOpenCap, L"Prefer OpenCap in SteamVR", 662, 567, 227, BS_AUTOCHECKBOX);
-        edit(udpIp, 30, 654, 183);
-        edit(vmcPort, 226, 654, 93);
-        edit(oscPort, 332, 654, 93);
-        button(applyStream, L"Apply streaming", 438, 651, 167);
-        SetDlgItemTextW(window_, udpIp, widen(prefs_.stream.address).c_str());
-        SetDlgItemInt(window_, vmcPort, prefs_.stream.vmcPort, FALSE);
-        SetDlgItemInt(window_, oscPort, prefs_.stream.oscPort, FALSE);
+        edit(udpIp, 30, 654, 174);
+        edit(vmcPort, 215, 654, 77);
+        edit(oscIp, 314, 654, 174);
+        edit(oscPort, 499, 654, 77);
+        button(applyStream, L"Apply streaming", 592, 651, 167);
+        showStream();
         if (prefs_.hotkey && !RegisterHotKey(window_, 1, MOD_NOREPEAT, VK_F1)) prefs_.hotkey = false;
         CheckDlgButton(window_, globalHotkey, prefs_.hotkey ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemInt(window_, channelValue, 20, FALSE);
@@ -342,6 +368,45 @@ private:
         return value;
     }
 
+    std::string readIp(int id) const {
+        std::string result;
+        for (const auto character : field(id)) {
+            if ((character < L'0' || character > L'9') && character != L'.')
+                throw std::invalid_argument("Invalid IPv4 character");
+            result.push_back(static_cast<char>(character));
+        }
+        return result;
+    }
+
+    void showStream() {
+        SetDlgItemTextW(window_, udpIp, widen(prefs_.stream.address).c_str());
+        SetDlgItemTextW(window_, oscIp, widen(prefs_.stream.oscAddress).c_str());
+        SetDlgItemInt(window_, vmcPort, prefs_.stream.vmcPort, FALSE);
+        SetDlgItemInt(window_, oscPort, prefs_.stream.oscPort, FALSE);
+    }
+
+    void importSettings() {
+        if (quickMask_ || std::ranges::any_of(snapshot_.hands, [](const auto& h) { return h.calibrationStep != 0; })) {
+            status_ = L"Finish the current calibration before importing settings.";
+            return;
+        }
+        if (folder_.empty()) { status_ = L"OpenCap's settings folder is unavailable."; return; }
+        auto source = readUdcapPreferences(findUdcapSources(folder_.parent_path()));
+        if (!source.found) { status_ = L"No UDCAP settings were found."; return; }
+        auto next = prefs_;
+        applyUdcapPreferences(source, next.hands, next.stream);
+        next.udcapImport = nextImport(prefs_.udcapImport);
+        if (!saveSettings(folder_, next)) { status_ = L"Could not save the imported settings."; return; }
+        prefs_ = std::move(next);
+        stream_.configure(prefs_.stream);
+#ifdef OPENCAP_RECEIVER
+        if (receiver_) receiver_->importPreferences(std::move(source.receiver), prefs_.udcapImport);
+#endif
+        select(side_);
+        showStream();
+        status_ = source.saved ? L"Saved UDCAP settings imported." : L"UDCAP factory defaults imported.";
+    }
+
     void save() {
         status_ = saveSettings(folder_, prefs_) ? L"Settings saved." : L"Could not save settings.";
     }
@@ -350,6 +415,7 @@ private:
         auto& settings = prefs_.hands[side_];
         const auto& hand = snapshot_.hands[side_];
         switch (id) {
+        case importUdcap: importSettings(); break;
         case leftHand: select(0); break;
         case rightHand: select(1); break;
         case nextPose:
@@ -419,14 +485,7 @@ private:
             break;
         case applyStream:
             try {
-                const auto address = field(udpIp);
-                std::string ip;
-                for (const auto character : address) {
-                    if ((character < L'0' || character > L'9') && character != L'.')
-                        throw std::invalid_argument("Invalid IPv4 character");
-                    ip.push_back(static_cast<char>(character));
-                }
-                StreamSettings next{std::move(ip), parse<unsigned>(field(vmcPort)), parse<unsigned>(field(oscPort))};
+                StreamSettings next{readIp(udpIp), parse<unsigned>(field(vmcPort)), parse<unsigned>(field(oscPort)), readIp(oscIp)};
                 if (!stream_.configure(next)) throw std::invalid_argument("Invalid endpoint");
                 prefs_.stream = std::move(next);
                 save();
@@ -592,6 +651,8 @@ private:
         }
         snapshot_.heartbeat = now();
         snapshot_.settings = prefs_.hands;
+        for (std::size_t s = 0; s < handCount; ++s)
+            applyHandPreferences(snapshot_.hands[s], snapshot_.settings[s]);
         bus_.publish(snapshot_);
         stream_.send(snapshot_);
         for (std::size_t s = 0; s < handCount; ++s) {
@@ -715,9 +776,10 @@ private:
             : !demo_ && !snapshot_.receiverSupported ? L"This build supports simulated input. Physical receiver support is disabled." : L"";
         text(dc, 30, 577, message, accent);
         text(dc, 30, 610, L"STREAM OUTPUT", accent);
-        text(dc, 30, 632, L"Destination IPv4");
-        text(dc, 226, 632, L"VMC port");
-        text(dc, 332, 632, L"OSC port");
+        text(dc, 30, 632, L"VMC destination");
+        text(dc, 215, 632, L"Port");
+        text(dc, 314, 632, L"OSC destination");
+        text(dc, 499, 632, L"Port");
         text(dc, 30, 695, L"Port 0 turns the stream off.");
         BitBlt(target, 0, 0, winWidth, winHeight, dc, 0, 0, SRCCOPY);
         SelectObject(dc, oldFont);

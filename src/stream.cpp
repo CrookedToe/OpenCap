@@ -102,15 +102,16 @@ Stream::~Stream() = default;
 
 bool Stream::configure(const StreamSettings& settings) {
     if (settings.vmcPort > 65535 || settings.oscPort > 65535) return false;
-    sockaddr_in endpoint{};
-    endpoint.sin_family = AF_INET;
-    if (InetPtonA(AF_INET, settings.address.c_str(), &endpoint.sin_addr) != 1) return false;
+    sockaddr_in vmc{}, osc{};
+    vmc.sin_family = osc.sin_family = AF_INET;
+    if (InetPtonA(AF_INET, settings.address.c_str(), &vmc.sin_addr) != 1 ||
+        InetPtonA(AF_INET, settings.oscAddress.c_str(), &osc.sin_addr) != 1) return false;
     if ((settings.vmcPort || settings.oscPort) && impl_->socket == INVALID_SOCKET) return false;
     if (impl_->oscWasLive) impl_->transmit(status(false), impl_->osc);
-    endpoint.sin_port = htons(static_cast<u_short>(settings.vmcPort));
-    impl_->vmc = endpoint;
-    endpoint.sin_port = htons(static_cast<u_short>(settings.oscPort));
-    impl_->osc = endpoint;
+    vmc.sin_port = htons(static_cast<u_short>(settings.vmcPort));
+    osc.sin_port = htons(static_cast<u_short>(settings.oscPort));
+    impl_->vmc = vmc;
+    impl_->osc = osc;
     impl_->oscWasLive = false;
     impl_->lastOscRefresh = 0;
     return true;

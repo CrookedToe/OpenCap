@@ -91,6 +91,7 @@ DriverPose_t makePose(Side side, const HandSettings& settings, bool connected, c
     DriverPose_t output{};
     output.qWorldFromDriverRotation.w = output.qDriverFromHeadRotation.w = output.qRotation.w = 1;
     output.deviceIsConnected = connected;
+    output.poseTimeOffset = settings.poseTimeOffset;
     output.result = connected ? TrackingResult_Running_OutOfRange : TrackingResult_Uninitialized;
     if (!connected) return output;
     const auto index = findTracker(side, settings, poses);
@@ -180,7 +181,7 @@ public:
         }
         if (!connected && !previouslyConnected_) return;
         previouslyConnected_ = connected;
-        const Hand data = connected ? hand : Hand{};
+        const Hand data = connected && !settings.skeletonOnly ? hand : Hand{};
         const auto mapped = remapButtons(data.buttons, settings.buttonMap);
         const auto input = VRDriverInput();
         for (std::size_t i = 0; i < buttons_.size(); ++i) {
@@ -201,7 +202,7 @@ public:
             battery_ = data.battery;
             VRProperties()->SetFloatProperty(props_, Prop_DeviceBatteryPercentage_Float, battery_);
         }
-        updateSkeleton(data);
+        updateSkeleton(connected ? hand : Hand{});
     }
 
     void haptic(const VREvent_HapticVibration_t& event, Bus& bus, bool enabled) const {
@@ -283,7 +284,7 @@ public:
             for (std::size_t i = 0; i < gloves_.size(); ++i) {
                 const auto& settings = snapshot_.settings[i];
                 if (gloves_[i]) gloves_[i]->haptic(event.data.hapticVibration, *bus_,
-                    settings.enabled && settings.haptics && isLive(snapshot_, static_cast<Side>(i), time));
+                    settings.enabled && !settings.skeletonOnly && settings.haptics && isLive(snapshot_, static_cast<Side>(i), time));
             }
         }
     }

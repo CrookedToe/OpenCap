@@ -57,6 +57,9 @@ struct HandSettings {
     bool joystick{true};
     bool haptics{true};
     bool highPriority{};
+    bool triggerEnabled{true}, gripEnabled{true}, padEnabled{true}, thumbEnabled{true};
+    bool skeletonOnly{};
+    float poseTimeOffset{};
 };
 
 struct Snapshot {
@@ -83,6 +86,7 @@ struct Command {
 };
 
 bool validJointOffset(Vec3 offset);
+void applyHandPreferences(Hand& hand, const HandSettings& settings);
 
 bool isLive(const Snapshot& snapshot, Side side, Millis now);
 std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map);

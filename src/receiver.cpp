@@ -5,12 +5,15 @@
 #include <UdCapProbe.h>
 #include <UdCapV1Core.h>
 #include <UsbEnumerate.h>
+#include <nlohmann/json.hpp>
+#include <windows.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <string_view>
@@ -72,6 +75,32 @@ public:
     Hand read() const {
         std::lock_guard lock(mutex_);
         return sample_;
+    }
+
+    void restorePreferences(const std::filesystem::path& directory, const ReceiverPreferences& defaults,
+                            std::uint64_t revision) {
+        if (core_.getState() != UD_INIT_STATE_LINKED) return;
+        const auto serial = core_.getUDCapSerial();
+        if (serial.empty()) return;
+        if (serial != loadedSerial_) {
+            loadedSerial_ = serial;
+            loadedRevision_ = 0;
+            try { core_.loadPref(); }
+            catch (const std::exception& error) { report(error.what()); }
+        }
+        if (loadedRevision_ == revision || read().calibrationStep != 0) return;
+        loadedRevision_ = revision;
+        if (defaults.empty() || !revision) return;
+        try {
+            const auto marker = directory / (serial + ".udcap-revision");
+            std::uint64_t previouslyImported{};
+            if (std::ifstream{marker} >> previouslyImported && previouslyImported == revision) return;
+            import(directory, defaults, serial);
+            std::ofstream output(marker, std::ios::trunc);
+            output << revision << '\n';
+            output.close();
+            if (!output) throw std::runtime_error("Could not record the glove settings import.");
+        } catch (const std::exception& error) { report(error.what()); }
     }
 
     void command(const Command& request) {
@@ -166,23 +195,51 @@ public:
     }
 
 private:
+    void report(std::string_view message) {
+        std::lock_guard lock(mutex_);
+        copyText(sample_.message, message);
+    }
+
+    void import(const std::filesystem::path& directory, const ReceiverPreferences& defaults, const std::string& serial) {
+        if (serial.size() > 32 || serial.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != std::string::npos)
+            throw std::runtime_error("Invalid glove identity for importing settings.");
+        std::filesystem::create_directories(directory);
+        const auto target = directory / (serial + ".json");
+        const auto temporary = directory / (serial + ".udcap-import.tmp");
+        struct RemoveTemporary {
+            const std::filesystem::path& path;
+            ~RemoveTemporary() { std::error_code error; std::filesystem::remove(path, error); }
+        } cleanup{temporary};
+        if (!core_.savePref(temporary.string())) throw std::runtime_error("Could not prepare glove settings.");
+
+        nlohmann::json next;
+        {
+            std::ifstream input(temporary);
+            input >> next;
+        }
+        for (const auto& [key, value] : defaults.controller) next["controller"][key] = value;
+        if (defaults.hasCurves) {
+            auto curves = nlohmann::json::array();
+            for (const auto& curve : defaults.curves)
+                curves.push_back({{"min", curve.min}, {"max", curve.max}, {"balance", curve.balance}, {"offset", curve.offset}});
+            next["handResponse"] = std::move(curves);
+        }
+        {
+            std::ofstream output(temporary, std::ios::trunc);
+            output << next.dump(2) << '\n';
+            output.close();
+            if (!output) throw std::runtime_error("Could not write imported glove settings.");
+        }
+        if (!core_.loadPref(temporary.string())) throw std::runtime_error("The glove rejected the imported preferences.");
+        if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Glove settings were applied but could not be saved.");
+    }
+
     void save() {
         if (!core_.savePref()) throw std::runtime_error("Could not save glove calibration.");
     }
 
     void receive(const UdCapV1MCUPacket& packet) {
-        if (packet.commandType == CMD_SERIAL || packet.commandType == CMD_LINK_STATE) {
-            const auto serial = core_.getUDCapSerial();
-            if (!serial.empty() && serial != loadedSerial_ && core_.getState() == UD_INIT_STATE_LINKED) {
-                try {
-                    core_.loadPref();
-                    loadedSerial_ = serial;
-                } catch (const std::exception& error) {
-                    std::lock_guard lock(mutex_);
-                    copyText(sample_.message, error.what());
-                }
-            }
-        }
         const auto battery = packet.commandType == CMD_BATTERY ? core_.getBattery() : std::nullopt;
         const auto signal = packet.commandType == CMD_BATTERY ? core_.getRssiDbm() : std::nullopt;
         const bool calibrated = core_.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_COMPLETED;
@@ -279,13 +336,21 @@ private:
     Millis fpsStart_{};
     int frames_{};
     std::string loadedSerial_;
+    std::uint64_t loadedRevision_{};
     UdCapV1Core core_;
     std::function<void()> unlisten_;
 };
 }
 
 struct Receiver::Impl {
-    explicit Impl(const std::filesystem::path& preferences) {
+    struct Defaults {
+        std::array<ReceiverPreferences, handCount> hands;
+        std::uint64_t revision{};
+    };
+
+    Impl(const std::filesystem::path& preferences, std::array<ReceiverPreferences, handCount> hands,
+         std::uint64_t revision)
+        : preferences(preferences), defaults(std::make_shared<Defaults>(Defaults{std::move(hands), revision})) {
         try { CorePref::getInstance().setDefaultPrefPath(preferences.string()); }
         catch (const std::exception&) {}
         worker = std::jthread([this](std::stop_token stop) { loop(stop); });
@@ -343,15 +408,24 @@ struct Receiver::Impl {
                 nextRefresh = std::chrono::steady_clock::now() + 3s;
             }
             std::deque<Command> pending;
+            std::shared_ptr<const Defaults> currentDefaults;
             {
                 std::unique_lock lock(commandMutex);
                 changed.wait_for(lock, stop, 30ms, [&] { return !commands.empty(); });
                 pending.swap(commands);
+                currentDefaults = defaults;
+            }
+            const auto devicesNow = members();
+            for (const auto& device : devicesNow) {
+                const auto side = device->side();
+                if (side == UD_TARGET_UNKNOWN) continue;
+                const auto index = side == UD_TARGET_LEFT_HAND ? 0u : 1u;
+                device->restorePreferences(preferences, currentDefaults->hands[index],
+                                           currentDefaults->revision);
             }
             for (const auto& command : pending) {
                 if (stop.stop_requested()) break;
                 const auto side = command.side == Side::left ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
-                const auto devicesNow = members();
                 const auto device = std::ranges::find_if(devicesNow, [&](const auto& candidate) {
                     return candidate->side() == side;
                 });
@@ -365,10 +439,14 @@ struct Receiver::Impl {
     std::mutex commandMutex;
     std::condition_variable_any changed;
     std::deque<Command> commands;
+    std::filesystem::path preferences;
+    std::shared_ptr<const Defaults> defaults;
     std::jthread worker;
 };
 
-Receiver::Receiver(const std::filesystem::path& preferences) : impl_(std::make_unique<Impl>(preferences)) {}
+Receiver::Receiver(const std::filesystem::path& preferences, std::array<ReceiverPreferences, handCount> defaults,
+                   std::uint64_t importRevision)
+    : impl_(std::make_unique<Impl>(preferences, std::move(defaults), importRevision)) {}
 Receiver::~Receiver() = default;
 
 std::array<Hand, handCount> Receiver::read() const {
@@ -391,5 +469,10 @@ bool Receiver::submit(const Command& command) {
     }
     impl_->changed.notify_one();
     return true;
+}
+
+void Receiver::importPreferences(std::array<ReceiverPreferences, handCount> defaults, std::uint64_t importRevision) {
+    std::lock_guard lock(impl_->commandMutex);
+    impl_->defaults = std::make_shared<Impl::Defaults>(Impl::Defaults{std::move(defaults), importRevision});
 }
 }
