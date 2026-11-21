@@ -33,7 +33,7 @@ enum Control {
     leftHand = 100, rightHand, nextPose, cancelPose, centerStick, finishStick, pair,
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
-    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap
+    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment
 };
 
 struct Preferences {
@@ -290,6 +290,7 @@ private:
         button(applyPose, L"Apply tracker alignment", 422, 531, 228);
         button(saveCsv, L"Export hand sample", 30, 528, 181);
         button(handView, L"Open hand viewer", 223, 528, 170);
+        button(jointAdjustment, L"Joint correction…", 223, 205, 170);
         button(globalHotkey, L"F1 quick calibration", 662, 531, 227, BS_AUTOCHECKBOX);
         button(preferOpenCap, L"Prefer OpenCap in SteamVR", 662, 567, 227, BS_AUTOCHECKBOX);
         edit(udpIp, 30, 654, 183);
@@ -378,6 +379,20 @@ private:
                 save();
             }
             break;
+        case jointAdjustment:
+            if (!isLive(snapshot_, static_cast<Side>(side_), now()) || !hand.calibrated) {
+                status_ = L"Connect and calibrate this glove before adjusting its joints.";
+                break;
+            }
+            {
+                const auto current = hand.jointOffsets;
+                if (const auto joint = editJoint(window_, current)) {
+                    const auto [x, y, z] = joint->offset;
+                    if (!bus_.send({static_cast<Side>(side_), Action::setJointOffset, joint->joint, x, y, z}))
+                        status_ = L"The command queue is busy.";
+                }
+            }
+            break;
         case applyPose:
             try {
                 auto next = settings;
@@ -445,6 +460,7 @@ private:
     void send(Action action, int value = 0, float duration = 0, float amplitude = 0) {
         if (!bus_.send({static_cast<Side>(side_), action, value, duration, amplitude}))
             status_ = L"The command queue is busy.";
+        else status_.clear();
     }
 
     void startQuick(unsigned requested) {
@@ -535,13 +551,19 @@ private:
             if (demo_) {
                 auto& step = demoSteps_[s];
                 switch (command->action) {
-                case Action::startHand: step = 1; break;
+                case Action::startHand: if (step != 4) step = 1; break;
                 case Action::fist: if (step == 1) step = 2; break;
                 case Action::together: if (step == 2) step = 3; break;
                 case Action::spread:
                 case Action::cancelHand: if (step && step <= 3) step = 0; break;
-                case Action::joystickCenter: step = 4; break;
+                case Action::joystickCenter: if (!step || step == 4) step = 4; break;
                 case Action::joystickFinish: if (step == 4) step = 0; break;
+                case Action::setJointOffset: {
+                    const Vec3 offset{command->duration, command->amplitude, command->extra};
+                    const auto joint = static_cast<std::size_t>(command->value);
+                    if (joint < jointCount && validJointOffset(offset)) demoOffsets_[s][joint] = offset;
+                    break;
+                }
                 default: break;
                 }
                 continue;
@@ -561,6 +583,11 @@ private:
             for (std::size_t s = 0; s < handCount; ++s) {
                 snapshot_.hands[s] = demoHand(static_cast<Side>(s), time);
                 snapshot_.hands[s].calibrationStep = demoSteps_[s];
+                snapshot_.hands[s].jointOffsets = demoOffsets_[s];
+                for (std::size_t j = 0; j < jointCount; ++j) {
+                    auto& rotation = snapshot_.hands[s].joints[j].rotation;
+                    rotation = multiply(rotation, eulerDegrees(demoOffsets_[s][j]));
+                }
             }
         }
         snapshot_.heartbeat = now();
@@ -580,6 +607,7 @@ private:
             SetDlgItemTextW(window_, nextPose, calibration[(std::min)(stage, 4u)].label);
             EnableWindow(GetDlgItem(window_, nextPose), stage != 4);
             EnableWindow(GetDlgItem(window_, cancelPose), stage >= 1 && stage <= 3);
+            EnableWindow(GetDlgItem(window_, centerStick), stage == 0 || stage == 4);
             EnableWindow(GetDlgItem(window_, finishStick), stage == 4);
         }
         if (time - lastPaint_ >= 50) {
@@ -716,6 +744,7 @@ private:
     unsigned lastStage_{UINT32_MAX};
     Millis lastPaint_{};
     std::array<unsigned, handCount> demoSteps_{}, lastRequests_{};
+    std::array<std::array<Vec3, jointCount>, handCount> demoOffsets_{};
     std::wstring status_;
     bool bothPairing_{};
     unsigned quickMask_{}, quickPhase_{};

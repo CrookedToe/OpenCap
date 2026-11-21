@@ -23,7 +23,7 @@ Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-D
 4. Start SteamVR. Use **Open in SteamVR** to make the dashboard available. To register it for future sessions, run the registration script with `-Dashboard` while SteamVR is running.
 5. Assign a tracker to each hand in SteamVR or enter a tracker serial or device index in OpenCap. Position offsets are in metres and rotation offsets are in degrees.
 
-Use **Map inputs** for per-hand button assignments and **Open hand viewer** for an orbitable hand model and live joint data. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
+Use **Map inputs** for per-hand button assignments, **Joint correction** for finger adjustments, and **Open hand viewer** for an orbitable model and live joint data. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 

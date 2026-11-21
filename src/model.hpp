@@ -42,6 +42,7 @@ struct Hand {
     std::array<float, 5> curl{};
     std::array<float, 23> angles{};
     std::array<Joint, jointCount> joints{};
+    std::array<Vec3, jointCount> jointOffsets{};
     std::array<char, 40> firmware{};
     std::array<char, 96> message{};
 };
@@ -69,7 +70,7 @@ struct Snapshot {
 enum class Action : std::uint32_t {
     startHand, fist, together, spread, cancelHand,
     joystickCenter, joystickRange, joystickFinish,
-    pairStart, pairStop, pairBoth, pairBothStop, channel, haptic, toggleStick, adjustPose
+    pairStart, pairStop, pairBoth, pairBothStop, channel, haptic, toggleStick, adjustPose, setJointOffset
 };
 
 struct Command {
@@ -78,7 +79,10 @@ struct Command {
     int value{};
     float duration{};
     float amplitude{};
+    float extra{};
 };
+
+bool validJointOffset(Vec3 offset);
 
 bool isLive(const Snapshot& snapshot, Side side, Millis now);
 std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map);

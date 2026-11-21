@@ -4,6 +4,10 @@
 #include <numbers>
 
 namespace opencap {
+bool validJointOffset(Vec3 offset) {
+    return std::abs(offset.x) <= 45 && std::abs(offset.y) <= 45 && std::abs(offset.z) <= 45;
+}
+
 std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map) {
     constexpr unsigned mappedMask = (1u << std::tuple_size_v<ButtonMap>) - 1;
     auto mapped = input & ~mappedMask;

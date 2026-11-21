@@ -78,6 +78,11 @@ static void checkDemo(const wchar_t* path) {
             return sample.hands[1].calibrationStep == (i + 1) % 4 && sample.hands[0].calibrationStep == 0;
         }), "Calibration advances on the requested hand");
     }
+    require(bus.send({Side::right, Action::setJointOffset, 3, 12, -10, 5}), "Send a joint correction to the desktop");
+    require(waitFor([](const auto& sample) {
+        const auto right = sample.hands[1].jointOffsets[3];
+        return right.x == 12 && right.y == -10 && right.z == 5 && sample.hands[0].jointOffsets[3].x == 0;
+    }), "Joint correction applies only to the requested hand");
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -113,6 +118,8 @@ int wmain(int argc, wchar_t** argv) {
         const auto point = rotate(eulerDegrees({0, 0, 90}), {1, 0, 0});
         require(std::abs(point.x) < 1e-5f && std::abs(point.y - 1) < 1e-5f, "Rotation is right-handed");
         require(normalize({0, 0, 0, 0}).w == 1.0f, "Invalid quaternion resets to identity");
+        require(validJointOffset({45, -45, 0}) && !validJointOffset({0, 46, 0}),
+                "Joint corrections enforce the supported angle limit");
         const ButtonMap mapping{1, 0, disabledButton, 3};
         require(remapButtons(bit(Button::a) | bit(Button::system) | bit(Button::grip), mapping)
                     == (bit(Button::b) | bit(Button::grip)), "Input mapping swaps and disables selected outputs");

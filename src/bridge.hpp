@@ -8,7 +8,7 @@
 
 namespace opencap {
 Millis now();
-inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v3";
+inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v4";
 
 class Bus {
 public:

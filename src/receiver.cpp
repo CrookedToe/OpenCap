@@ -41,6 +41,18 @@ void copyText(std::array<char, size>& dest, std::string_view value) {
 float unit(float value) { return std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f; }
 float axis(float value) { return std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f; }
 
+std::array<BoneRotation*, jointCount> jointRotations(HandRotation& hand) {
+    const std::array<FingerRotation*, 5> fingers{&hand.thumbFinger, &hand.indexFinger, &hand.middleFinger,
+                                               &hand.ringFinger, &hand.littleFinger};
+    std::array<BoneRotation*, jointCount> joints{};
+    for (std::size_t i = 0; i < fingers.size(); ++i) {
+        joints[3*i] = &fingers[i]->proximal;
+        joints[3*i + 1] = &fingers[i]->intermediate;
+        joints[3*i + 2] = &fingers[i]->distal;
+    }
+    return joints;
+}
+
 class Device {
 public:
     explicit Device(std::shared_ptr<PortAccessor> port, UdTarget fallback)
@@ -71,6 +83,7 @@ public:
                 throw std::runtime_error("Connect the glove first.");
             switch (request.action) {
             case Action::startHand:
+                if (stage == 4) throw std::runtime_error("Finish the joystick calibration first.");
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
                 stage = 1;
                 break;
@@ -101,6 +114,7 @@ public:
                 }
                 break;
             case Action::joystickCenter:
+                if (stage >= 1 && stage <= 3) throw std::runtime_error("Finish or cancel hand calibration first.");
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
                 core_.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_CENTER);
                 stage = 4;
@@ -129,6 +143,16 @@ public:
                     core_.mcuSendVibration(1, request.duration, static_cast<int>(std::lround(10 * unit(request.amplitude))));
                 }
                 break;
+            case Action::setJointOffset: {
+                const auto index = static_cast<std::size_t>(request.value);
+                const Vec3 offset{request.duration, request.amplitude, request.extra};
+                if (index >= jointCount || !validJointOffset(offset)) throw std::runtime_error("Invalid joint adjustment.");
+                auto angles = core_.getHandOffset();
+                *jointRotations(angles)[index] = {offset.x, offset.y, offset.z};
+                core_.setHandOffset(angles);
+                save();
+                break;
+            }
             case Action::toggleStick:
             case Action::adjustPose: break;
             }
@@ -211,6 +235,12 @@ private:
         case CMD_ANGLE:
             std::transform(packet.result.begin(), packet.result.begin() + sample_.angles.size(), sample_.angles.begin(),
                              [](double value) { return static_cast<float>(value); });
+            {
+                auto offsets = packet.angleBoneOffset;
+                const auto joints = jointRotations(offsets);
+                for (std::size_t i = 0; i < joints.size(); ++i)
+                    sample_.jointOffsets[i] = {joints[i]->x, joints[i]->y, joints[i]->z};
+            }
             break;
         case CMD_INPUT_BUTTON: {
             const auto& b = packet.button;
