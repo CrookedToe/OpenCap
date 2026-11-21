@@ -1,7 +1,5 @@
 #include "bridge.hpp"
-
-#include <openvr_driver.h>
-#include <hand_simulation.h>
+#include "vr_skeleton.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,7 +18,7 @@ constexpr std::array<const char*, 5> fingerPaths{
     "/input/finger/ring/value", "/input/finger/pinky/value"
 };
 
-struct BooleanInput { const char* path; Button button; };
+struct BooleanInput { const char* path; Button button; bool touch{}; };
 constexpr std::array booleanInputs{
     BooleanInput{"/input/a/click", Button::a},
     BooleanInput{"/input/b/click", Button::b},
@@ -28,10 +26,23 @@ constexpr std::array booleanInputs{
     BooleanInput{"/input/joystick/click", Button::stick},
     BooleanInput{"/input/thumbstick/click", Button::stick},
     BooleanInput{"/input/trigger/click", Button::trigger},
+    BooleanInput{"/input/trigger/touch", Button::trigger, true},
+    BooleanInput{"/input/grip/click", Button::grip},
+    BooleanInput{"/input/grip/touch", Button::grip, true},
     BooleanInput{"/input/grab/click", Button::grip},
     BooleanInput{"/input/pinch/click", Button::trigger},
-    BooleanInput{"/input/trackpad/touch", Button::pad}
+    BooleanInput{"/input/trackpad/touch", Button::pad, true},
+    BooleanInput{"/input/trackpad/click", Button::pad}
 };
+
+bool buttonValue(const BooleanInput& input, const Hand& hand, std::uint32_t buttons, bool joystickEnabled) {
+    if (input.button == Button::stick && !joystickEnabled) return false;
+    if (buttons & bit(input.button)) return true;
+    if (!input.touch) return false;
+    if (input.button == Button::trigger) return hand.trigger > 0;
+    if (input.button == Button::grip) return hand.grip > 0;
+    return hand.pad > 0;
+}
 
 Quaternion matrixRotation(const HmdMatrix34_t& pose) {
     const auto& m = pose.m;
@@ -142,7 +153,7 @@ public:
         constexpr std::array axes{"/input/joystick/x", "/input/joystick/y", "/input/thumbstick/x", "/input/thumbstick/y"};
         for (std::size_t i = 0; i < axes.size(); ++i)
             input->CreateScalarComponent(props_, axes[i], &axes_[i], VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
-        constexpr std::array scalars{"/input/trigger/value", "/input/grip/value", "/input/grip/force"};
+        constexpr std::array scalars{"/input/trigger/value", "/input/grip/value", "/input/grip/force", "/input/trackpad/force"};
         for (std::size_t i = 0; i < scalars.size(); ++i)
             input->CreateScalarComponent(props_, scalars[i], &analogs_[i], VRScalarType_Absolute, VRScalarUnits_NormalizedOneSided);
         for (std::size_t i = 0; i < fingers_.size(); ++i)
@@ -185,15 +196,14 @@ public:
         const auto mapped = remapButtons(data.buttons, settings.buttonMap);
         const auto input = VRDriverInput();
         for (std::size_t i = 0; i < buttons_.size(); ++i) {
-            const auto button = booleanInputs[i].button;
-            const bool pressed = (button != Button::stick || settings.joystick) && (mapped & bit(button));
+            const auto pressed = buttonValue(booleanInputs[i], data, mapped, settings.joystick);
             if (buttons_[i]) input->UpdateBooleanComponent(buttons_[i], pressed, 0);
         }
         for (std::size_t i = 0; i < axes_.size(); ++i) {
             const auto value = i % 2 ? data.stickY : data.stickX;
             if (axes_[i]) input->UpdateScalarComponent(axes_[i], settings.joystick ? value : 0, 0);
         }
-        const std::array values{data.trigger, data.grip, data.grip};
+        const std::array values{data.trigger, data.grip, data.grip, data.pad};
         for (std::size_t i = 0; i < analogs_.size(); ++i)
             if (analogs_[i]) input->UpdateScalarComponent(analogs_[i], values[i], 0);
         for (std::size_t i = 0; i < fingers_.size(); ++i)
@@ -215,17 +225,11 @@ public:
 private:
     void updateSkeleton(const Hand& hand) {
         if (!skeleton_) return;
-        VRBoneTransform_t transforms[eBone_Count]{};
-        const auto& c = hand.curl;
-        std::array<float, 5> splay{};
-        for (std::size_t i = 0; i < splay.size(); ++i) {
-            const auto q = normalize(hand.joints[3 * i].rotation);
-            splay[i] = std::clamp(2 * std::atan2(q.y, q.w) / .35f, -1.0f, 1.0f);
-        }
-        skeletonModel_.ComputeSkeletonTransforms(role_, {c[0], c[1], c[2], c[3], c[4]},
-            {splay[0], splay[1], splay[2], splay[3], splay[4]}, transforms);
-        VRDriverInput()->UpdateSkeletonComponent(skeleton_, VRSkeletalMotionRange_WithController, transforms, eBone_Count);
-        VRDriverInput()->UpdateSkeletonComponent(skeleton_, VRSkeletalMotionRange_WithoutController, transforms, eBone_Count);
+        const auto transforms = makeVrHandSkeleton(side_, hand);
+        VRDriverInput()->UpdateSkeletonComponent(skeleton_, VRSkeletalMotionRange_WithController,
+                                                  transforms.data(), static_cast<uint32_t>(transforms.size()));
+        VRDriverInput()->UpdateSkeletonComponent(skeleton_, VRSkeletalMotionRange_WithoutController,
+                                                  transforms.data(), static_cast<uint32_t>(transforms.size()));
     }
 
     Side side_;
@@ -234,10 +238,9 @@ private:
     PropertyContainerHandle_t props_{};
     std::array<VRInputComponentHandle_t, booleanInputs.size()> buttons_{};
     std::array<VRInputComponentHandle_t, 4> axes_{};
-    std::array<VRInputComponentHandle_t, 3> analogs_{};
+    std::array<VRInputComponentHandle_t, 4> analogs_{};
     std::array<VRInputComponentHandle_t, fingerPaths.size()> fingers_{};
     VRInputComponentHandle_t skeleton_{}, haptic_{};
-    MyHandSimulation skeletonModel_;
     std::mutex poseMutex_;
     DriverPose_t lastPose_{};
     float battery_{-1};

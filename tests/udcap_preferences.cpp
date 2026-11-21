@@ -65,13 +65,13 @@ int wmain(int argc, wchar_t** argv) {
         put(f.sources.desktopSettings, R"json({"SchemaVersion":1,"Settings":{
           "L_Rocky_X_Center":"1702","L_TriggerValue_Min":"20","L_Vibartion_Enable":false,"L_ThumbOn":"False",
           "L_Coefficient_Index1_Pitch":"1.25","L_Offset_Index1_Pitch":"-3","L_Balance_Index1_Pitch":"0.7",
-          "L_Output_Middle1_Yaw":"5","Controller_Priority":"True",
+          "L_Output_Middle1_Yaw":"5","Controller_Priority":"True","Controller_Module":"True",
           "VMC_State":"True","VMC_IP":"127.0.0.2","VMC_PORT":"39539",
           "OSC_State":"True","OSC_IP":"127.0.0.3","OSC_PORT":"9000",
           "VRSpaceCustom":"True","VRSpaceCustomValueStr":"-.1,-.2,-.3,10,-20,30,.1,.2,.3,40,50,60,"
         }})json");
         data = readUdcapPreferences(f.sources);
-        require(data.saved && !data.hands[0].haptics && !data.hands[0].thumbEnabled && data.hands[1].highPriority,
+        require(data.saved && data.quickStick && !data.hands[0].haptics && !data.hands[0].thumbEnabled && data.hands[1].highPriority,
                 "Saved desktop values override installed defaults");
         require(data.receiver[0].controller.at("xCenterData") == 1702
             && data.receiver[0].controller.at("xMaxData") == 3800

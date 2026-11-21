@@ -120,6 +120,19 @@ int wmain(int argc, wchar_t** argv) {
         require(normalize({0, 0, 0, 0}).w == 1.0f, "Invalid quaternion resets to identity");
         require(validJointOffset({45, -45, 0}) && !validJointOffset({0, 46, 0}),
                 "Joint corrections enforce the supported angle limit");
+        require(validButtonRange({.2f, .5f}) && !validButtonRange({.6f, .5f}) && !validButtonRange({.1f, 1.2f}),
+                "Touch and click thresholds must be ordered and normalized");
+        StickHold hold;
+        auto alignment = std::array<HandSettings, handCount>{};
+        alignment[0].tracker = 8;
+        require(applyTrackingPreset(alignment, 1) && alignment[0].tracker == 8
+            && alignment[0].rotation.y == -60 && alignment[1].rotation.y == 60
+            && alignment[0].position.z == .04f && !applyTrackingPreset(alignment, 100),
+            "Tracking presets preserve bindings and apply both hand transforms");
+        require(!hold.update(true, 1000) && !hold.update(true, 5999) && hold.update(true, 6000),
+                "Holding the physical stick toggles its output at five seconds");
+        require(!hold.update(true, 9000) && !hold.update(false, 9010) && !hold.update(true, 10000) && hold.update(true, 15000),
+                "A second toggle requires release and another hold");
         const ButtonMap mapping{1, 0, disabledButton, 3};
         require(remapButtons(bit(Button::a) | bit(Button::system) | bit(Button::grip), mapping)
                     == (bit(Button::b) | bit(Button::grip)), "Input mapping swaps and disables selected outputs");

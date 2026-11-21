@@ -179,6 +179,11 @@ void applyPose(const JsonObject& source, std::array<HandSettings, handCount>& ha
 }
 
 void applyCustomPose(const Values& values, std::array<HandSettings, handCount>& hands) {
+    if (const auto preset = parseNumber(setting(values, "VRSpaceSelectedIndex"));
+        preset && within(*preset, 0, trackingPresets.size()-1) && std::trunc(*preset) == *preset) {
+        applyTrackingPreset(hands, static_cast<std::size_t>(*preset));
+        return;
+    }
     if (!parseBool(setting(values, "VRSpaceCustom")).value_or(false)) return;
     auto csv = std::string_view(setting(values, "VRSpaceCustomValueStr"));
     std::array<float, 12> data{};
@@ -313,6 +318,7 @@ UdcapPreferences readUdcapPreferences(const UdcapSources& sources) {
     }
     streamValue(values, "VMC", result.stream.address, result.stream.vmcPort);
     streamValue(values, "OSC", result.stream.oscAddress, result.stream.oscPort);
+    result.quickStick = parseBool(setting(values, "Controller_Module")).value_or(false);
     applyCustomPose(values, result.hands);
     if (const auto registry = readJson(sources.steamvrRegistry)) {
         const auto config = get(*registry, "config");

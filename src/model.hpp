@@ -24,6 +24,21 @@ constexpr unsigned disabledButton = 8;
 struct Vec3 { float x{}, y{}, z{}; };
 struct Quaternion { float x{}, y{}, z{}, w{1}; };
 struct Joint { Quaternion rotation{}; };
+struct ButtonRange {
+    float touch{}, click{};
+    bool operator==(const ButtonRange&) const = default;
+};
+using ButtonRanges = std::array<ButtonRange, 3>;
+constexpr ButtonRanges defaultButtonRanges{{{.25f, .5f}, {.5f, 1}, {.5f, 1}}};
+
+class StickHold {
+public:
+    bool update(bool held, Millis time);
+
+private:
+    Millis started_{};
+    bool pressed_{}, consumed_{};
+};
 
 struct Hand {
     Millis lastFrame{};
@@ -39,6 +54,7 @@ struct Hand {
     unsigned calibrationRequests{};
     std::uint32_t buttons{};
     float stickX{}, stickY{}, trigger{}, grip{}, pad{};
+    ButtonRanges buttonRanges{defaultButtonRanges};
     std::array<float, 5> curl{};
     std::array<float, 23> angles{};
     std::array<Joint, jointCount> joints{};
@@ -62,6 +78,19 @@ struct HandSettings {
     float poseTimeOffset{};
 };
 
+struct TrackerAlignment { Vec3 position, rotation; };
+struct TrackingPreset {
+    const wchar_t* name;
+    std::array<TrackerAlignment, handCount> hands;
+};
+inline constexpr std::array trackingPresets{
+    TrackingPreset{L"VIVE Tracker", {{{{.1f, .1f, .05f}, {45, -85, 0}}, {{-.1f, .1f, .05f}, {45, 85, 0}}}}},
+    TrackingPreset{L"Tundra Tracker", {{{{-.09f, .09f, .04f}, {60, -60, 75}}, {{-.09f, -.09f, .04f}, {60, 60, 105}}}}},
+    TrackingPreset{L"Quest controller", {{{{.1f, -.1f, -.02f}, {-35, -20, 0}}, {{-.1f, -.1f, -.02f}, {-35, 20, 0}}}}},
+    TrackingPreset{L"VIVE Ultimate Tracker", {{{{.1f, -.05f, -.06f}, {46, 13, -88}}, {{.09f, -.07f, .07f}, {220, 11, 80}}}}}
+};
+bool applyTrackingPreset(std::array<HandSettings, handCount>& hands, std::size_t preset);
+
 struct Snapshot {
     Millis heartbeat{};
     bool demo{};
@@ -73,7 +102,8 @@ struct Snapshot {
 enum class Action : std::uint32_t {
     startHand, fist, together, spread, cancelHand,
     joystickCenter, joystickRange, joystickFinish,
-    pairStart, pairStop, pairBoth, pairBothStop, channel, haptic, toggleStick, adjustPose, setJointOffset
+    pairStart, pairStop, pairBoth, pairBothStop, channel, haptic, toggleStick, adjustPose, setJointOffset,
+    setButtonRanges, applyPreset, guidedCalibration
 };
 
 struct Command {
@@ -83,9 +113,11 @@ struct Command {
     float duration{};
     float amplitude{};
     float extra{};
+    ButtonRanges ranges{};
 };
 
 bool validJointOffset(Vec3 offset);
+bool validButtonRange(ButtonRange range);
 void applyHandPreferences(Hand& hand, const HandSettings& settings);
 
 bool isLive(const Snapshot& snapshot, Side side, Millis now);

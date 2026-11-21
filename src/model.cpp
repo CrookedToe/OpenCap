@@ -4,8 +4,32 @@
 #include <numbers>
 
 namespace opencap {
+bool applyTrackingPreset(std::array<HandSettings, handCount>& hands, std::size_t preset) {
+    if (preset >= trackingPresets.size()) return false;
+    for (std::size_t i = 0; i < hands.size(); ++i) {
+        hands[i].position = trackingPresets[preset].hands[i].position;
+        hands[i].rotation = trackingPresets[preset].hands[i].rotation;
+    }
+    return true;
+}
+
 bool validJointOffset(Vec3 offset) {
     return std::abs(offset.x) <= 45 && std::abs(offset.y) <= 45 && std::abs(offset.z) <= 45;
+}
+
+bool validButtonRange(ButtonRange range) {
+    return range.touch >= 0 && range.click <= 1 && range.touch <= range.click;
+}
+
+bool StickHold::update(bool held, Millis time) {
+    if (!held) { pressed_ = consumed_ = false; return false; }
+    if (!pressed_ || time < started_) {
+        started_ = time;
+        pressed_ = true;
+    }
+    if (consumed_ || time - started_ < 5000) return false;
+    consumed_ = true;
+    return true;
 }
 
 void applyHandPreferences(Hand& hand, const HandSettings& settings) {
@@ -83,7 +107,8 @@ Hand demoHand(Side side, Millis now) {
         const auto curl = (std::sin(t * 2.0f + static_cast<float>(finger) * .4f) + 1.0f) / 2.0f;
         hand.curl[finger] = curl;
         for (std::size_t joint = 0; joint < 3; ++joint) {
-            hand.joints[finger * 3 + joint].rotation = eulerDegrees({0, 0, -curl * 70.0f});
+            const float bend = (side == Side::left ? 1.0f : -1.0f) * curl * (70 - 8 * static_cast<float>(joint));
+            hand.joints[finger * 3 + joint].rotation = eulerDegrees(finger == 0 ? Vec3{0, -bend, 0} : Vec3{0, 0, bend});
         }
     }
     hand.trigger = hand.curl[1];

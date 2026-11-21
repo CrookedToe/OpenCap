@@ -13,7 +13,7 @@
 
 namespace {
 using namespace opencap;
-constexpr int width = 900, height = 552;
+constexpr int width = 900, height = 610;
 constexpr char key[] = "opencap.dashboard";
 constexpr COLORREF background = RGB(17, 27, 40);
 constexpr COLORREF foreground = RGB(234, 242, 248);
@@ -115,12 +115,15 @@ constexpr RECT leftButton{36, 100, 268, 151};
 constexpr RECT rightButton{282, 100, 514, 151};
 constexpr RECT calibrate{36, 257, 324, 308};
 constexpr RECT cancel{340, 257, 500, 308};
+constexpr RECT quickCalibration{516, 257, 797, 308};
 constexpr RECT joystick{36, 327, 324, 378};
 constexpr RECT vibration{340, 327, 592, 378};
 constexpr RECT alignMinus{36, 447, 168, 498};
 constexpr RECT alignPlus{179, 447, 311, 498};
 constexpr RECT alignAxis{326, 447, 539, 498};
 constexpr RECT alignMode{550, 447, 862, 498};
+constexpr RECT presetType{36, 521, 348, 572};
+constexpr RECT applyPreset{366, 521, 590, 572};
 constexpr std::array calibrationLabels{L"Calibrate hand", L"Capture fist", L"Capture fingers together", L"Capture fingers spread"};
 constexpr std::array calibrationActions{Action::startHand, Action::fist, Action::together, Action::spread};
 
@@ -193,12 +196,15 @@ private:
             send(calibrationActions[hand.calibrationStep]);
         else if (PtInRect(&cancel, point) && hand.calibrationStep >= 1 && hand.calibrationStep <= 3)
             send(Action::cancelHand);
+        else if (PtInRect(&quickCalibration, point) && hand.calibrationStep == 0) send(Action::guidedCalibration);
         else if (PtInRect(&joystick, point)) send(Action::toggleStick);
         else if (PtInRect(&vibration, point)) send(Action::haptic, 0, .12f, .8f);
         else if (PtInRect(&alignAxis, point)) axis_ = (axis_ + 1) % 3;
         else if (PtInRect(&alignMode, point)) rotation_ = !rotation_;
         else if (PtInRect(&alignMinus, point)) send(Action::adjustPose, axis_ + (rotation_ ? 3 : 0), 0, -1);
         else if (PtInRect(&alignPlus, point)) send(Action::adjustPose, axis_ + (rotation_ ? 3 : 0), 0, 1);
+        else if (PtInRect(&presetType, point)) preset_ = (preset_ + 1) % trackingPresets.size();
+        else if (PtInRect(&applyPreset, point)) send(Action::applyPreset, static_cast<int>(preset_));
     }
 
     bool paint() {
@@ -227,6 +233,7 @@ private:
         canvas_.label(calibrate, stage < calibrationLabels.size() ? calibrationLabels[stage] : L"Joystick calibration",
                       active && stage < calibrationLabels.size());
         canvas_.label(cancel, L"Cancel", active && stage >= 1 && stage <= 3);
+        canvas_.label(quickCalibration, L"Guided calibration", active && stage == 0);
         canvas_.label(joystick, settings.joystick ? L"Disable joystick" : L"Enable joystick", active);
         canvas_.label(vibration, L"Test vibration", active);
         const auto v = rotation_ ? settings.rotation : settings.position;
@@ -239,6 +246,8 @@ private:
         canvas_.label(alignPlus, L"+ Step", active);
         canvas_.label(alignAxis, L"Axis " + name, active);
         canvas_.label(alignMode, rotation_ ? L"Adjust position" : L"Adjust rotation", active);
+        canvas_.label(presetType, trackingPresets[preset_].name, active);
+        canvas_.label(applyPreset, L"Apply to both hands", active);
         return canvas_.upload(*overlay_, main_);
     }
 
@@ -249,6 +258,7 @@ private:
     Bus bus_;
     Snapshot snapshot_{};
     std::size_t side_{};
+    std::size_t preset_{};
     int axis_{};
     bool rotation_{};
 };

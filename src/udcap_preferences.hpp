@@ -30,6 +30,7 @@ struct UdcapSources {
 struct UdcapPreferences {
     bool found{};
     bool saved{};
+    bool quickStick{};
     std::array<HandSettings, handCount> hands{};
     StreamSettings stream;
     std::array<ReceiverPreferences, handCount> receiver;

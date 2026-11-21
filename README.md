@@ -27,7 +27,9 @@ The import covers joystick center, range and dead zone, trigger, grip and trackp
 4. Start SteamVR. Use **Open in SteamVR** to make the dashboard available. To register it for future sessions, run the registration script with `-Dashboard` while SteamVR is running.
 5. Assign a tracker to each hand in SteamVR or enter a tracker serial or device index in OpenCap. Position offsets are in metres and rotation offsets are in degrees.
 
-Use **Map inputs** for per-hand button assignments, **Joint correction** for finger adjustments, and **Open hand viewer** for an orbitable model and live joint data. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
+Use **Controller** to set per-hand button assignments and touch and click thresholds, **Joint correction** for finger adjustments, and **Open hand viewer** for an orbitable model and live joint data. Enable **Hold stick to toggle joystick** to use the five-second shortcut while wearing the gloves. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
+
+The tracker presets apply starting offsets for VIVE Tracker, Tundra Tracker, Quest controller, or VIVE Ultimate Tracker. They preserve your tracker assignments. You can select the same presets in the SteamVR dashboard.
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 

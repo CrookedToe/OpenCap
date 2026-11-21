@@ -66,6 +66,7 @@ public:
         core_.mcuGetLinkState();
         core_.mcuGetFirmwareVersion();
         core_.mcuGetChannel();
+        readButtonRanges();
     }
 
     ~Device() { if (unlisten_) unlisten_(); }
@@ -85,7 +86,7 @@ public:
         if (serial != loadedSerial_) {
             loadedSerial_ = serial;
             loadedRevision_ = 0;
-            try { core_.loadPref(); }
+            try { core_.loadPref(); readButtonRanges(); }
             catch (const std::exception& error) { report(error.what()); }
         }
         if (loadedRevision_ == revision || read().calibrationStep != 0) return;
@@ -96,6 +97,7 @@ public:
             std::uint64_t previouslyImported{};
             if (std::ifstream{marker} >> previouslyImported && previouslyImported == revision) return;
             import(directory, defaults, serial);
+            readButtonRanges();
             std::ofstream output(marker, std::ios::trunc);
             output << revision << '\n';
             output.close();
@@ -182,8 +184,23 @@ public:
                 save();
                 break;
             }
+            case Action::setButtonRanges: {
+                if (!std::ranges::all_of(request.ranges, validButtonRange))
+                    throw std::runtime_error("Invalid controller thresholds.");
+                core_.setTriggerButtonMin(request.ranges[0].touch);
+                core_.setTriggerButtonMax(request.ranges[0].click);
+                core_.setGripButtonMin(request.ranges[1].touch);
+                core_.setGripButtonMax(request.ranges[1].click);
+                core_.setTrackpadButtonMin(request.ranges[2].touch);
+                core_.setTrackpadButtonMax(request.ranges[2].click);
+                readButtonRanges();
+                save();
+                break;
+            }
             case Action::toggleStick:
-            case Action::adjustPose: break;
+            case Action::adjustPose:
+            case Action::applyPreset:
+            case Action::guidedCalibration: break;
             }
             std::lock_guard lock(mutex_);
             sample_.calibrationStep = stage;
@@ -195,6 +212,13 @@ public:
     }
 
 private:
+    void readButtonRanges() {
+        const ButtonRanges ranges{{{core_.getTriggerButtonMin(), core_.getTriggerButtonMax()},
+            {core_.getGripButtonMin(), core_.getGripButtonMax()}, {core_.getTrackpadButtonMin(), core_.getTrackpadButtonMax()}}};
+        std::lock_guard lock(mutex_);
+        sample_.buttonRanges = ranges;
+    }
+
     void report(std::string_view message) {
         std::lock_guard lock(mutex_);
         copyText(sample_.message, message);
@@ -246,10 +270,13 @@ private:
         std::lock_guard lock(mutex_);
         sample_.calibrated = calibrated;
         switch (packet.commandType) {
-        case CMD_PORT_CONNECTION_STATE:
+        case CMD_PORT_CONNECTION_STATE: {
+            const auto ranges = sample_.buttonRanges;
             sample_ = {};
             sample_.receiver = packet.portConnectionState == PORT_ACCESSOR_CONNECTION_STATE_CONNECTED;
+            sample_.buttonRanges = ranges;
             break;
+        }
         case CMD_LINK_STATE:
             sample_.linked = packet.udState == UD_INIT_STATE_LINKED;
             if (!sample_.linked) {

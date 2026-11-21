@@ -33,7 +33,8 @@ target_compile_options(opencap_bridge PUBLIC "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
 
 add_library(opencap_udcap_preferences STATIC src/udcap_preferences.cpp)
 target_link_libraries(opencap_udcap_preferences PUBLIC opencap_bridge PRIVATE windowsapp xmllite shlwapi ole32 ws2_32)
-add_executable(OpenCap WIN32 src/desktop.cpp src/hand_view.cpp src/input_dialog.cpp src/stream.cpp)
+add_executable(OpenCap WIN32 src/desktop.cpp src/desktop_main.cpp src/desktop_preferences.cpp src/desktop_view.cpp
+    src/hand_view.cpp src/input_dialog.cpp src/stream.cpp)
 target_link_libraries(OpenCap PRIVATE opencap_bridge opencap_udcap_preferences shell32 ole32 comdlg32 ws2_32 sapi)
 if(OPENCAP_RECEIVER)
     set(BUILD_TEST_TOOLS OFF CACHE BOOL "" FORCE)
@@ -47,10 +48,12 @@ if(OPENCAP_RECEIVER)
 endif()
 
 set(hand_sample "${OPENVR_SDK_ROOT}/samples/drivers/drivers/handskeletonsimulation/src")
-add_library(driver_opencap SHARED src/driver.cpp "${hand_sample}/hand_simulation.cpp")
-target_include_directories(driver_opencap PRIVATE "${OPENVR_SDK_ROOT}/headers"
+add_library(opencap_vr_skeleton STATIC src/vr_skeleton.cpp "${hand_sample}/hand_simulation.cpp")
+target_include_directories(opencap_vr_skeleton PUBLIC "${OPENVR_SDK_ROOT}/headers" PRIVATE
     "${hand_sample}" "${OPENVR_SDK_ROOT}/samples/drivers/utils/vrmath")
-target_link_libraries(driver_opencap PRIVATE opencap_bridge)
+target_link_libraries(opencap_vr_skeleton PUBLIC opencap_bridge)
+add_library(driver_opencap SHARED src/driver.cpp)
+target_link_libraries(driver_opencap PRIVATE opencap_vr_skeleton)
 
 add_executable(OpenCapDashboard WIN32 src/dashboard.cpp)
 target_link_libraries(OpenCapDashboard PRIVATE opencap_bridge openvr_client gdi32)
@@ -83,4 +86,7 @@ if(BUILD_TESTING)
     add_executable(OpenCapUdcapChecks tests/udcap_preferences.cpp)
     target_link_libraries(OpenCapUdcapChecks PRIVATE opencap_udcap_preferences)
     add_test(NAME OpenCapUdcapChecks COMMAND OpenCapUdcapChecks)
+    add_executable(OpenCapSkeletonChecks tests/vr_skeleton.cpp)
+    target_link_libraries(OpenCapSkeletonChecks PRIVATE opencap_vr_skeleton)
+    add_test(NAME OpenCapSkeletonChecks COMMAND OpenCapSkeletonChecks)
 endif()
