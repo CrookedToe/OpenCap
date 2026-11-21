@@ -1,0 +1,12 @@
+/.opencap-git/
+/build*/
+/out/
+/.vs/
+*.user
+*.log
+*.csv
+*.bin
+*.exe
+*.dll
+*.pdb
+*.zip
