@@ -18,7 +18,9 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <iterator>
 #include <locale>
+#include <span>
 #include <sstream>
 #include <string_view>
 
@@ -31,7 +33,7 @@ enum Control {
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
     applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
-    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup
+    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup, saveCalibration
 };
 
 struct CalibrationControl {
@@ -209,6 +211,7 @@ private:
         button(applyPose, L"Apply tracker alignment", 422, 531, 228);
         button(saveCsv, L"Export hand sample", 30, 528, 181);
         button(handView, L"Open hand viewer", 223, 528, 170);
+        if (!demo_) button(saveCalibration, L"Export calibration", 30, 562, 181);
         button(jointAdjustment, L"Joint correction…", 223, 205, 170);
         button(globalHotkey, L"F1 quick calibration", 662, 531, 227, BS_AUTOCHECKBOX);
         button(preferOpenCap, L"Prefer OpenCap in SteamVR", 662, 567, 227, BS_AUTOCHECKBOX);
@@ -446,6 +449,16 @@ private:
             save();
             break;
         case saveCsv: exportCsv(); break;
+        case saveCalibration:
+#ifdef OPENCAP_RECEIVER
+            if (const auto samples = receiver_ ? receiver_->calibration(static_cast<Side>(side_)) : std::nullopt) {
+                if (const auto saved = exportCalibrationReport(window_, static_cast<Side>(side_), *samples))
+                    status_ = *saved ? L"Calibration report saved." : L"Could not save the calibration report.";
+                break;
+            }
+#endif
+            status_ = L"Connect a glove with a saved calibration to export it.";
+            break;
         case handView:
             if (!openHandView(window_, static_cast<unsigned>(side_))) status_ = L"Could not open the hand viewer.";
             break;
@@ -473,6 +486,30 @@ private:
         else status_ = L"Joystick changed but the setting could not be saved.";
         if (settings.haptics && isLive(snapshot_, static_cast<Side>(side), now()))
             bus_.send({static_cast<Side>(side), Action::haptic, 0, .12f, .75f});
+    }
+
+    void changeTracker(std::size_t side, bool automatic) {
+        auto& hand = prefs_.hands[side];
+        if (automatic) {
+            hand.tracker = noTracker;
+            hand.trackerSerial.fill(0);
+        } else {
+            const auto tracking = bus_.readTracking();
+            if (!tracking || !trackingCurrent(*tracking, now()) || !tracking->count) {
+                status_ = L"No SteamVR tracker is available.";
+                return;
+            }
+            const auto count = (std::min<std::size_t>)(tracking->count, tracking->devices.size());
+            const auto devices = std::span{tracking->devices}.first(count);
+            const auto current = std::ranges::find_if(devices, [&](const TrackerDevice& device) {
+                return hand.trackerSerial[0] ? hand.trackerSerial == device.serial : hand.tracker == device.index;
+            });
+            const auto next = current != devices.end() && std::next(current) != devices.end() ? std::next(current) : devices.begin();
+            hand.tracker = noTracker;
+            hand.trackerSerial = next->serial;
+        }
+        if (side_ == side) select(side);
+        save();
     }
 
     void usePreset(std::size_t preset) {
@@ -523,6 +560,13 @@ private:
             return;
         }
         if (quickPhase_ == 4) {
+            for (std::size_t i = 0; i < handCount; ++i) {
+                if (!(quickMask_ & (1u << i)) || !snapshot_.hands[i].message[0]) continue;
+                quickMask_ = 0;
+                status_ = (i == 0 ? L"Left glove: " : L"Right glove: ") + widen(snapshot_.hands[i].message.data());
+                voice_.say(L"Calibration needs attention. Check the glove status.");
+                return;
+            }
             quickMask_ = 0;
             status_ = L"Quick calibration complete.";
             voice_.say(L"Calibration complete.");
@@ -556,6 +600,25 @@ private:
             if (command->action == Action::toggleStick) {
                 toggleStick(s);
                 continue;
+            }
+            if (command->action == Action::togglePublishing || command->action == Action::toggleHaptics) {
+                auto& hand = prefs_.hands[s];
+                auto& enabled = command->action == Action::togglePublishing ? hand.enabled : hand.haptics;
+                enabled = !enabled;
+                if (side_ == s) select(s);
+                save();
+                continue;
+            }
+            if (command->action == Action::cycleTracker || command->action == Action::autoTracker) {
+                changeTracker(s, command->action == Action::autoTracker);
+                continue;
+            }
+            if (command->action == Action::channel) {
+                const auto other = 1 - s;
+                if (snapshot_.hands[other].receiver && command->value == snapshot_.hands[other].channel) {
+                    status_ = L"Choose a different channel from the other glove.";
+                    continue;
+                }
             }
             if (command->action == Action::applyPreset) {
                 usePreset(static_cast<std::size_t>(command->value));
@@ -593,6 +656,13 @@ private:
                 case Action::cancelHand: if (step && step <= 3) step = 0; break;
                 case Action::joystickCenter: if (!step || step == 4) step = 4; break;
                 case Action::joystickFinish: if (step == 4) step = 0; break;
+                case Action::pairStart: demoPairing_[s] = true; break;
+                case Action::pairStop: demoPairing_[s] = false; break;
+                case Action::pairBoth: demoPairing_.fill(true); break;
+                case Action::pairBothStop: demoPairing_.fill(false); break;
+                case Action::channel:
+                    if (command->value >= 0 && command->value <= 100) demoChannels_[s] = command->value;
+                    break;
                 case Action::setJointOffset: {
                     const Vec3 offset{command->duration, command->amplitude, command->extra};
                     const auto joint = static_cast<std::size_t>(command->value);
@@ -621,6 +691,8 @@ private:
             for (std::size_t s = 0; s < handCount; ++s) {
                 snapshot_.hands[s] = demoHand(static_cast<Side>(s), time);
                 snapshot_.hands[s].calibrationStep = demoSteps_[s];
+                snapshot_.hands[s].channel = demoChannels_[s];
+                snapshot_.hands[s].pairing = demoPairing_[s];
                 snapshot_.hands[s].jointOffsets = demoOffsets_[s];
                 snapshot_.hands[s].buttonRanges = demoRanges_[s];
                 for (std::size_t j = 0; j < jointCount; ++j) {
@@ -693,6 +765,8 @@ private:
     unsigned lastStage_{UINT32_MAX};
     Millis lastPaint_{};
     std::array<unsigned, handCount> demoSteps_{}, lastRequests_{};
+    std::array<int, handCount> demoChannels_{20, 40};
+    std::array<bool, handCount> demoPairing_{};
     std::array<std::array<Vec3, jointCount>, handCount> demoOffsets_{};
     std::array<ButtonRanges, handCount> demoRanges_{defaultButtonRanges, defaultButtonRanges};
     std::array<StickHold, handCount> stickHolds_{};

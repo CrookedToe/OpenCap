@@ -6,6 +6,7 @@
 #include <array>
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 namespace opencap {
 class Receiver {
@@ -17,6 +18,7 @@ public:
     Receiver& operator=(const Receiver&) = delete;
 
     std::array<Hand, handCount> read() const;
+    std::optional<CalibrationSamples> calibration(Side side) const;
     bool submit(const Command& command);
     void importPreferences(std::array<ReceiverPreferences, handCount> defaults, std::uint64_t importRevision);
 

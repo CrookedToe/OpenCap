@@ -10,14 +10,6 @@
 #include <format>
 
 namespace opencap {
-std::wstring widen(std::string_view value) {
-    if (value.empty()) return {};
-    const auto n = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    std::wstring out(static_cast<std::size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), n);
-    return out;
-}
-
 namespace {
 constexpr COLORREF ink = RGB(22, 36, 48);
 constexpr COLORREF accent = RGB(0, 111, 113);
@@ -92,7 +84,7 @@ void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
          100*hand.trigger, 100*hand.grip, 100*hand.pad));
     text(dc, 30, 498, std::format(L"Stick {:+.2f}, {:+.2f}   ·   Buttons 0x{:02X}", hand.stickX, hand.stickY, hand.buttons));
     if (active && hand.quality.measured)
-        text(dc, 30, 568, std::format(L"Calibration  ·  {} of {} channels below 10 counts",
+        text(dc, 223, 568, std::format(L"{} of {} channels with low movement",
                     hand.quality.lowChannels, hand.quality.counts.size()), accent);
     text(dc, 422, 208, hand.calibrated ? L"CALIBRATION  /  READY" : L"CALIBRATION", accent);
     text(dc, 422, 363, hand.channel >= 0 ? std::format(L"Channel {}", hand.channel) : L"Channel —");
@@ -119,8 +111,9 @@ void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
 }
 
 
-std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand) {
-    wchar_t destination[MAX_PATH] = L"opencap-hand.csv";
+static std::filesystem::path csvDestination(HWND window, const wchar_t* filename) {
+    wchar_t destination[MAX_PATH]{};
+    lstrcpynW(destination, filename, MAX_PATH);
     OPENFILENAMEW request{};
     request.lStructSize = sizeof(request);
     request.hwndOwner = window;
@@ -129,8 +122,13 @@ std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand) {
     request.lpstrFilter = L"CSV file\0*.csv\0\0";
     request.lpstrDefExt = L"csv";
     request.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetSaveFileNameW(&request)) return std::nullopt;
-    std::ofstream output{std::filesystem::path(destination)};
+    return GetSaveFileNameW(&request) ? std::filesystem::path{destination} : std::filesystem::path{};
+}
+
+std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand) {
+    const auto path = csvDestination(window, L"opencap-hand.csv");
+    if (path.empty()) return std::nullopt;
+    std::ofstream output{path};
     output.imbue(std::locale::classic());
     output << "hand,finger,joint,curl,qx,qy,qz,qw\n";
     for (std::size_t i = 0; i < hand.joints.size(); ++i) {
@@ -138,6 +136,17 @@ std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand) {
         output << (side == Side::right ? "right" : "left") << ',' << i/3 << ',' << i%3 << ','
                << hand.curl[i/3] << ',' << q.x << ',' << q.y << ',' << q.z << ',' << q.w << '\n';
     }
+    output.close();
+    return static_cast<bool>(output);
+}
+
+std::optional<bool> exportCalibrationReport(HWND window, Side side, const CalibrationSamples& samples) {
+    const auto path = csvDestination(window,
+        side == Side::left ? L"opencap-left-calibration.csv" : L"opencap-right-calibration.csv");
+    if (path.empty()) return std::nullopt;
+    std::ofstream output{path};
+    output.imbue(std::locale::classic());
+    writeCalibrationReport(output, side, samples);
     output.close();
     return static_cast<bool>(output);
 }

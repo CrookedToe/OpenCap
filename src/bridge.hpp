@@ -5,9 +5,11 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace opencap {
 Millis now();
+std::wstring widen(std::string_view value);
 inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v8";
 
 class Bus {

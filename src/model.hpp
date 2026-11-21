@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 
 namespace opencap {
 using Millis = std::uint64_t;
@@ -31,12 +32,15 @@ struct ButtonRange {
 using ButtonRanges = std::array<ButtonRange, 3>;
 constexpr ButtonRanges defaultButtonRanges{{{.25f, .5f}, {.5f, 1}, {.5f, 1}}};
 using RawGloveSample = std::array<std::int16_t, 19>;
+using CalibrationSamples = std::array<RawGloveSample, 3>;
+constexpr std::uint16_t calibrationMovementThreshold = 25;
 struct CalibrationSpans {
     std::array<std::uint16_t, 12> counts{};
     unsigned lowChannels{};
     bool measured{};
 };
-CalibrationSpans calibrationSpans(const std::array<RawGloveSample, 3>& samples);
+CalibrationSpans calibrationSpans(const CalibrationSamples& samples);
+void writeCalibrationReport(std::ostream& output, Side side, const CalibrationSamples& samples);
 
 class StickHold {
 public:
@@ -127,7 +131,7 @@ enum class Action : std::uint32_t {
     startHand, fist, together, spread, cancelHand,
     joystickCenter, joystickRange, joystickFinish,
     pairStart, pairStop, pairBoth, pairBothStop, channel, haptic, toggleStick, adjustPose, setJointOffset,
-    setButtonRanges, applyPreset, guidedCalibration
+    setButtonRanges, applyPreset, guidedCalibration, togglePublishing, toggleHaptics, cycleTracker, autoTracker
 };
 
 struct Command {

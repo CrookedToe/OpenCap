@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <openvr.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -22,11 +23,12 @@ constexpr COLORREF muted = RGB(151, 173, 187);
 constexpr COLORREF accent = RGB(96, 224, 201);
 constexpr COLORREF panel = RGB(31, 48, 65);
 
-void startDesktopIfEnabled() {
-    if (!loadSettings(configFolder(false)).steamLifecycle || FindWindowW(L"OpenCapDesktop", nullptr)) return;
+bool openDesktop(bool managed) {
+    if (FindWindowW(L"OpenCapDesktop", nullptr)) return true;
     const auto directory = executableFolder();
     const auto executable = directory / L"OpenCap.exe";
-    auto command = L"\"" + executable.wstring() + L"\" --steamvr-session " + std::to_wstring(GetCurrentProcessId());
+    auto command = L"\"" + executable.wstring() + L"\"";
+    if (managed) command += L" --steamvr-session " + std::to_wstring(GetCurrentProcessId());
     STARTUPINFOW start{};
     start.cb = sizeof(start);
     start.dwFlags = STARTF_USESHOWWINDOW;
@@ -36,7 +38,9 @@ void startDesktopIfEnabled() {
                        directory.c_str(), &start, &process)) {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
+        return true;
     }
+    return false;
 }
 
 class Runtime {
@@ -89,6 +93,14 @@ public:
         SelectObject(dc_, previous);
     }
 
+    void status(RECT area, std::wstring_view value) {
+        const auto previous = SelectObject(dc_, body_);
+        SetTextColor(dc_, muted);
+        DrawTextW(dc_, value.data(), static_cast<int>(value.size()), &area,
+                  DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc_, previous);
+    }
+
     void label(RECT area, std::wstring_view value, bool enabled, bool selected = false) {
         rect(area, selected ? RGB(11, 94, 98) : panel);
         text(area.left + 12, area.top + 9, value, enabled ? foreground : muted);
@@ -125,6 +137,19 @@ private:
 
 constexpr RECT leftButton{36, 100, 268, 151};
 constexpr RECT rightButton{282, 100, 514, 151};
+constexpr RECT pageButton{650, 24, 862, 75};
+constexpr RECT launchDesktop{36, 245, 310, 296};
+constexpr RECT pairSelected{36, 244, 289, 295};
+constexpr RECT pairBoth{304, 244, 561, 295};
+constexpr RECT radioDown{36, 306, 155, 357};
+constexpr RECT radioUp{170, 306, 289, 357};
+constexpr RECT radioApply{304, 306, 561, 357};
+constexpr RECT centerJoystick{36, 374, 289, 425};
+constexpr RECT finishJoystick{304, 374, 561, 425};
+constexpr RECT publishHand{36, 442, 289, 493};
+constexpr RECT hapticsEnabled{304, 442, 561, 493};
+constexpr RECT nextTracker{36, 510, 289, 561};
+constexpr RECT autoTracker{304, 510, 561, 561};
 constexpr RECT calibrate{36, 257, 324, 308};
 constexpr RECT cancel{340, 257, 500, 308};
 constexpr RECT quickCalibration{516, 257, 797, 308};
@@ -167,7 +192,7 @@ public:
 
     int run() {
         if (!paint()) throw std::runtime_error("SteamVR rejected the dashboard texture.");
-        startDesktopIfEnabled();
+        if (loadSettings(configFolder(false)).steamLifecycle) openDesktop(true);
         auto lastPaint = now();
         while (true) {
             if (const auto update = bus_.read(1)) snapshot_ = *update;
@@ -198,13 +223,56 @@ public:
 
 private:
     void send(Action action, int value = 0, float duration = 0, float amplitude = 0) {
-        bus_.send({static_cast<Side>(side_), action, value, duration, amplitude});
+        problem_ = bus_.send({static_cast<Side>(side_), action, value, duration, amplitude})
+            ? L"" : L"The desktop command queue is busy.";
+    }
+
+    bool desktopAvailable(Millis time) const {
+        return snapshot_.heartbeat && time >= snapshot_.heartbeat && time - snapshot_.heartbeat < sampleTimeout;
+    }
+
+    int proposedChannel() const {
+        const auto current = snapshot_.hands[side_].channel;
+        return channels_[side_].value_or(current >= 0 && current <= 100 ? current : 20);
+    }
+
+    bool duplicateChannel() const {
+        const auto& other = snapshot_.hands[1 - side_];
+        return other.receiver && proposedChannel() == other.channel;
+    }
+
+    void clickSetup(POINT point, Millis time) {
+        const auto& hand = snapshot_.hands[side_];
+        const auto live = isLive(snapshot_, static_cast<Side>(side_), time);
+        const auto stage = hand.calibrationStep;
+        if (hand.receiver && PtInRect(&pairSelected, point)) send(hand.pairing ? Action::pairStop : Action::pairStart);
+        else if (hand.receiver && PtInRect(&pairBoth, point))
+            send(hand.pairing || snapshot_.hands[1 - side_].pairing ? Action::pairBothStop : Action::pairBoth);
+        else if (hand.receiver && PtInRect(&radioDown, point)) channels_[side_] = std::max(0, proposedChannel() - 1);
+        else if (hand.receiver && PtInRect(&radioUp, point)) channels_[side_] = std::min(100, proposedChannel() + 1);
+        else if (hand.receiver && !duplicateChannel() && PtInRect(&radioApply, point))
+            send(Action::channel, proposedChannel());
+        else if (live && stage == 0 && PtInRect(&centerJoystick, point)) send(Action::joystickCenter);
+        else if (live && stage == 4 && PtInRect(&finishJoystick, point)) send(Action::joystickFinish);
+        else if (PtInRect(&publishHand, point)) send(Action::togglePublishing);
+        else if (PtInRect(&hapticsEnabled, point)) send(Action::toggleHaptics);
+        else if (trackingCurrent(tracking_, time) && tracking_.count && PtInRect(&nextTracker, point))
+            send(Action::cycleTracker);
+        else if (PtInRect(&autoTracker, point)) send(Action::autoTracker);
     }
 
     void click(POINT point) {
+        problem_ = L"";
         if (PtInRect(&leftButton, point)) { side_ = 0; return; }
         if (PtInRect(&rightButton, point)) { side_ = 1; return; }
-        if (!isLive(snapshot_, static_cast<Side>(side_), now())) return;
+        if (PtInRect(&pageButton, point)) { setup_ = !setup_; return; }
+        const auto time = now();
+        if (!desktopAvailable(time)) {
+            if (PtInRect(&launchDesktop, point) && !openDesktop(false)) problem_ = L"Could not open the OpenCap desktop.";
+            return;
+        }
+        if (setup_) { clickSetup(point, time); return; }
+        if (!isLive(snapshot_, static_cast<Side>(side_), time)) return;
         const auto& hand = snapshot_.hands[side_];
         if (PtInRect(&calibrate, point) && hand.calibrationStep < calibrationActions.size())
             send(calibrationActions[hand.calibrationStep]);
@@ -221,9 +289,33 @@ private:
         else if (PtInRect(&applyPreset, point)) send(Action::applyPreset, static_cast<int>(preset_));
     }
 
+    void paintSetup(const Hand& hand, const HandSettings& settings, bool live, Millis time) {
+        const auto stage = hand.calibrationStep;
+        const auto eitherPairing = hand.pairing || snapshot_.hands[1 - side_].pairing;
+        const auto viewChannel = hand.channel >= 0 ? std::to_wstring(hand.channel) : L"—";
+        canvas_.text(36, 209, std::format(L"Receiver channel  {}   Selected  {}", viewChannel, proposedChannel()), muted);
+        canvas_.label(pairSelected, hand.pairing ? L"Stop pairing" : L"Pair selected glove", hand.receiver);
+        canvas_.label(pairBoth, eitherPairing ? L"Stop both" : L"Pair both gloves", hand.receiver);
+        canvas_.label(radioDown, L"− Channel", hand.receiver);
+        canvas_.label(radioUp, L"+ Channel", hand.receiver);
+        canvas_.label(radioApply, L"Apply channel", hand.receiver && !duplicateChannel());
+        canvas_.label(centerJoystick, L"Set joystick center", live && stage == 0);
+        canvas_.label(finishJoystick, L"Finish joystick range", live && stage == 4);
+        canvas_.label(publishHand, settings.enabled ? L"Hide SteamVR hand" : L"Show SteamVR hand", true);
+        canvas_.label(hapticsEnabled, settings.haptics ? L"Disable haptics" : L"Enable haptics", true);
+        canvas_.label(nextTracker, L"Next tracker", trackingCurrent(tracking_, time) && tracking_.count);
+        canvas_.label(autoTracker, L"Automatic tracker", true);
+        const auto serial = settings.trackerSerial[0] ? widen(settings.trackerSerial.data())
+            : settings.tracker == noTracker ? L"Automatic" : std::format(L"#{}", settings.tracker);
+        canvas_.status({579, 520, 862, 553}, serial);
+        if (duplicateChannel())
+            canvas_.status({579, 317, 862, 350}, L"Used by the other glove");
+    }
+
     bool paint() {
         canvas_.rect({0, 0, width, height}, background);
         canvas_.text(36, 24, L"OpenCap", foreground, true);
+        canvas_.label(pageButton, setup_ ? L"Calibration" : L"Device setup", true);
         const auto time = now();
         const auto& hand = snapshot_.hands[side_];
         const auto& settings = snapshot_.settings[side_];
@@ -245,6 +337,16 @@ private:
         } else {
             canvas_.text(36, 176, time >= snapshot_.heartbeat && snapshot_.heartbeat && time - snapshot_.heartbeat < sampleTimeout
                 ? L"The selected glove is offline." : L"Open the desktop app to connect your gloves.", muted);
+        }
+        if (!problem_.empty()) canvas_.status({36, 578, 862, 609}, problem_);
+        else if (hand.message[0]) canvas_.status({36, 578, 862, 609}, widen(hand.message.data()));
+        if (!desktopAvailable(time)) {
+            canvas_.label(launchDesktop, L"Open desktop", true);
+            return canvas_.upload(*overlay_, main_);
+        }
+        if (setup_) {
+            paintSetup(hand, settings, active, time);
+            return canvas_.upload(*overlay_, main_);
         }
         canvas_.text(36, 217, L"Glove controls", muted);
         const auto stage = hand.calibrationStep;
@@ -280,6 +382,9 @@ private:
     std::size_t preset_{};
     int axis_{};
     bool rotation_{};
+    bool setup_{};
+    std::array<std::optional<int>, handCount> channels_{};
+    std::wstring problem_;
 };
 
 int registration(bool remove) {

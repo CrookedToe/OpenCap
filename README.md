@@ -35,7 +35,9 @@ Use **Controller** to set per-hand button assignments and touch and click thresh
 
 The tracker presets apply starting offsets for VIVE Tracker, Tundra Tracker, Quest controller, or VIVE Ultimate Tracker. They preserve your tracker assignments. With SteamVR and the OpenCap driver running, the Tracker ID menu lists connected controllers and trackers by serial. The desktop and dashboard show the active pose source.
 
-OpenCap saves the three hand poses for each glove. The hand viewer's data mode shows the measured span for each of the 12 sensor channels and highlights spans below 10 counts. Canceling or failing a new capture restores the last good calibration. **Inspect firmware image** reads the version and checks the payload hash of a UDCAP MCUboot file. Firmware transfers and recovery are tracked in [issue #4](https://github.com/CrookedToe/OpenCap/issues/4).
+OpenCap saves the three hand poses for each glove. **Export calibration** writes the raw captures and per-channel movement to CSV. The hand viewer highlights movement of 25 counts or less in the relevant flexion or splay poses. Canceling or failing a new capture restores the last good calibration. **Inspect firmware image** reads the version and checks the payload hash of a UDCAP MCUboot file. Firmware transfers and recovery are tracked in [issue #4](https://github.com/CrookedToe/OpenCap/issues/4).
+
+Open **Device setup** in the SteamVR dashboard to pair gloves, set a receiver channel, calibrate the joystick, change tracker selection, or toggle hand output and haptics.
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 

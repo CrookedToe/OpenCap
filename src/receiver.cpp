@@ -78,6 +78,17 @@ public:
         return sample_;
     }
 
+    std::optional<CalibrationSamples> calibration() const { return core_.handCalibrationSamples(); }
+
+    void expireChannelRequest() {
+        const auto time = now();
+        std::lock_guard lock(mutex_);
+        if (channelRequested_ && time - channelRequested_ >= 3000) {
+            channelRequested_ = 0;
+            copyText(sample_.message, "Receiver did not confirm the channel. Check the channel before retrying.");
+        }
+    }
+
     void restorePreferences(const std::filesystem::path& directory, const ReceiverPreferences& defaults,
                             std::uint64_t revision) {
         if (core_.getState() != UD_INIT_STATE_LINKED) return;
@@ -111,8 +122,8 @@ public:
     }
 
     void command(const Command& request, const std::filesystem::path& directory) {
+        auto stage = read().calibrationStep;
         try {
-            auto stage = read().calibrationStep;
             if (request.action != Action::pairStart && request.action != Action::pairStop &&
                 request.action != Action::pairBoth && request.action != Action::pairBothStop &&
                 request.action != Action::channel && core_.getState() != UD_INIT_STATE_LINKED)
@@ -138,9 +149,8 @@ public:
             case Action::spread:
                 if (stage == 3) {
                     capture(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
-                    setCalibrationStep(0);
-                    core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
                     stage = 0;
+                    core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
                     save(directory);
                 }
                 break;
@@ -163,7 +173,6 @@ public:
                 if (stage == 4) {
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
                     stage = 0;
-                    setCalibrationStep(stage);
                     save(directory);
                 }
                 break;
@@ -173,9 +182,8 @@ public:
             case Action::pairBothStop: core_.mcuStopPairingBoth(); break;
             case Action::channel:
                 if (request.value < 0 || request.value > 100) throw std::runtime_error("Channel must be 0 to 100.");
-                core_.mcuSetChannel(static_cast<uint8_t>(request.value));
-                core_.mcuGetChannel();
-                break;
+                changeChannel(static_cast<std::uint8_t>(request.value));
+                return;
             case Action::haptic:
                 core_.mcuSendHaptic(request.duration, request.amplitude, request.extra);
                 break;
@@ -205,21 +213,36 @@ public:
             case Action::toggleStick:
             case Action::adjustPose:
             case Action::applyPreset:
-            case Action::guidedCalibration: break;
+            case Action::guidedCalibration:
+            case Action::togglePublishing:
+            case Action::toggleHaptics:
+            case Action::cycleTracker:
+            case Action::autoTracker: break;
             }
             std::lock_guard lock(mutex_);
             sample_.calibrationStep = stage;
             if (request.action != Action::haptic) copyText(sample_.message, {});
         } catch (const std::exception& error) {
             std::lock_guard lock(mutex_);
+            sample_.calibrationStep = stage;
             copyText(sample_.message, error.what());
         }
     }
 
 private:
-    void setCalibrationStep(unsigned step) {
-        std::lock_guard lock(mutex_);
-        sample_.calibrationStep = step;
+    void changeChannel(std::uint8_t channel) {
+        {
+            std::lock_guard lock(mutex_);
+            if (channelRequested_) throw std::runtime_error("Wait for the current channel change.");
+            channelRequested_ = now();
+            copyText(sample_.message, "Waiting for receiver to confirm channel change.");
+        }
+        try { core_.mcuSetChannel(channel); }
+        catch (...) {
+            std::lock_guard lock(mutex_);
+            channelRequested_ = 0;
+            throw;
+        }
     }
 
     void capture(UdCapV1HandCaliType pose) {
@@ -307,6 +330,7 @@ private:
             sample_ = {};
             sample_.receiver = packet.portConnectionState == PORT_ACCESSOR_CONNECTION_STATE_CONNECTED;
             sample_.buttonRanges = ranges;
+            channelRequested_ = 0;
             break;
         }
         case CMD_LINK_STATE:
@@ -346,6 +370,15 @@ private:
             break;
         case CMD_FW_VERSION: copyText(sample_.firmware, packet.fwVersion); break;
         case CMD_GET_CHANNEL: sample_.channel = packet.channel; break;
+        case CMD_SET_CHANNEL:
+            if (channelRequested_) {
+                channelRequested_ = 0;
+                if (packet.channelResult == 2) {
+                    sample_.channel = packet.channel;
+                    copyText(sample_.message, "Receiver confirmed the channel change.");
+                } else copyText(sample_.message, "Receiver could not change the channel.");
+            }
+            break;
         case CMD_SET_CHANNEL_DONE: break;
         case CMD_PAIRING:
         case CMD_PAIRING_BOTH: sample_.pairing = packet.pairing; break;
@@ -402,12 +435,27 @@ private:
     mutable std::mutex mutex_;
     Hand sample_;
     Millis fpsStart_{};
+    Millis channelRequested_{};
     int frames_{};
     std::string loadedSerial_;
     std::uint64_t loadedRevision_{};
     UdCapV1Core core_;
     std::function<void()> unlisten_;
 };
+
+std::shared_ptr<Device> selectDevice(const std::vector<std::shared_ptr<Device>>& devices, UdTarget side) {
+    std::shared_ptr<Device> selected;
+    Millis latest = 0;
+    for (const auto& device : devices) {
+        if (device->side() != side) continue;
+        const auto frame = device->read().lastFrame;
+        if (!selected || frame > latest) {
+            selected = device;
+            latest = frame;
+        }
+    }
+    return selected;
+}
 }
 
 struct Receiver::Impl {
@@ -485,6 +533,7 @@ struct Receiver::Impl {
             }
             const auto devicesNow = members();
             for (const auto& device : devicesNow) {
+                device->expireChannelRequest();
                 const auto side = device->side();
                 if (side == UD_TARGET_UNKNOWN) continue;
                 const auto index = side == UD_TARGET_LEFT_HAND ? 0u : 1u;
@@ -494,10 +543,7 @@ struct Receiver::Impl {
             for (const auto& command : pending) {
                 if (stop.stop_requested()) break;
                 const auto side = command.side == Side::left ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
-                const auto device = std::ranges::find_if(devicesNow, [&](const auto& candidate) {
-                    return candidate->side() == side;
-                });
-                if (device != devicesNow.end()) (*device)->command(command, preferences);
+                if (const auto device = selectDevice(devicesNow, side)) device->command(command, preferences);
             }
         }
     }
@@ -516,6 +562,12 @@ Receiver::Receiver(const std::filesystem::path& preferences, std::array<Receiver
                    std::uint64_t importRevision)
     : impl_(std::make_unique<Impl>(preferences, std::move(defaults), importRevision)) {}
 Receiver::~Receiver() = default;
+
+std::optional<CalibrationSamples> Receiver::calibration(Side side) const {
+    const auto target = side == Side::left ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
+    const auto selected = selectDevice(impl_->members(), target);
+    return selected ? selected->calibration() : std::nullopt;
+}
 
 std::array<Hand, handCount> Receiver::read() const {
     std::array<Hand, handCount> hands{};

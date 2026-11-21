@@ -3,19 +3,36 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <ostream>
 
 namespace opencap {
-CalibrationSpans calibrationSpans(const std::array<RawGloveSample, 3>& samples) {
+static constexpr bool isSplayChannel(std::size_t index) { return index == 4 || index == 7 || index == 10; }
+
+CalibrationSpans calibrationSpans(const CalibrationSamples& samples) {
     CalibrationSpans result;
     result.measured = true;
     for (std::size_t i = 0; i < result.counts.size(); ++i) {
-        const auto input = i + 4;
-        const auto [minimum, maximum] = std::minmax({samples[0][input], samples[1][input], samples[2][input]});
-        const auto span = static_cast<std::uint16_t>(static_cast<int>(maximum) - minimum);
+        const auto span = static_cast<std::uint16_t>(std::abs(
+            static_cast<int>(samples[isSplayChannel(i) ? 2 : 0][i]) - samples[1][i]));
         result.counts[i] = span;
-        if (span < 10) ++result.lowChannels;
+        if (span <= calibrationMovementThreshold) ++result.lowChannels;
     }
     return result;
+}
+
+void writeCalibrationReport(std::ostream& output, Side side, const CalibrationSamples& samples) {
+    const auto spans = calibrationSpans(samples);
+    const auto hand = side == Side::left ? "left" : "right";
+    output << "hand,channel_type,channel,fist,together,spread,movement_counts,quality\n";
+    for (std::size_t i = 0; i < spans.counts.size(); ++i) {
+        const auto span = spans.counts[i];
+        output << hand << ',' << (isSplayChannel(i) ? "splay" : "flexion") << ',' << i + 4 << ','
+               << samples[0][i] << ',' << samples[1][i] << ',' << samples[2][i] << ',' << span << ','
+               << (span <= calibrationMovementThreshold ? "low movement" : "measured") << '\n';
+    }
+    for (std::size_t i = spans.counts.size(); i < samples.front().size(); ++i)
+        output << hand << ",auxiliary," << i - spans.counts.size() + 1 << ',' << samples[0][i] << ','
+               << samples[1][i] << ',' << samples[2][i] << ",,\n";
 }
 
 bool applyTrackingPreset(std::array<HandSettings, handCount>& hands, std::size_t preset) {

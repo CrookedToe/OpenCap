@@ -109,12 +109,12 @@ struct View {
                 TextOutW(dc, 20, 104 + static_cast<int>(f)*35, line.c_str(), static_cast<int>(line.size()));
             }
             if (live && hand.quality.measured) {
-                const std::wstring_view label = L"Raw sensor span across the three calibration poses";
+                const std::wstring_view label = L"Calibration movement in raw sensor counts";
                 TextOutW(dc, 20, 300, label.data(), static_cast<int>(label.size()));
                 for (std::size_t i = 0; i < hand.quality.counts.size(); ++i) {
                     const auto count = hand.quality.counts[i];
                     const auto value = std::format(L"{}  {}", i+4, count);
-                    SetTextColor(dc, count < 10 ? RGB(255, 166, 132) : active);
+                    SetTextColor(dc, count <= calibrationMovementThreshold ? RGB(255, 166, 132) : active);
                     TextOutW(dc, 20 + static_cast<int>(i % 4)*125, 327 + static_cast<int>(i / 4)*24,
                              value.c_str(), static_cast<int>(value.size()));
                 }

@@ -59,6 +59,14 @@ struct Bus::Impl {
 
 Millis now() { return GetTickCount64(); }
 
+std::wstring widen(std::string_view value) {
+    if (value.empty()) return {};
+    const auto n = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    std::wstring out(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), n);
+    return out;
+}
+
 Bus::Bus(const std::wstring& name) : impl_(std::make_unique<Impl>()) {
     impl_->mutex = CreateMutexW(nullptr, FALSE, (name + L".lock").c_str());
     const Lock lock(impl_->mutex, 1000);

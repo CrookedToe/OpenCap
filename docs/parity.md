@@ -6,13 +6,13 @@ The Windows reference installation identifies its desktop executable and assembl
 
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
-| Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and channel scan |
-| Calibration | Three-pose captures and raw sensor spans saved per glove, recalibration with cancel and recovery, saved joystick center and range, timed voice guidance | Match the first-party quality labels and export format, and compare physical poses including after restarts |
-| Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, five-second joystick shortcut, joint corrections, four UDCAP tracker presets and CSV sample export | Additional remapping and vibration behaviors, firmware workflows and localization |
+| Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection with receiver confirmation, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and interference measurements |
+| Calibration | Three-pose captures and flexion/splay quality saved per glove, raw CSV export, recalibration with cancel and recovery, saved joystick center and range, timed voice guidance | Compare the first-party quality grades and physical poses, including after restarts |
+| Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, five-second joystick shortcut, joint corrections, four UDCAP tracker presets and CSV sample export | Additional remapping and vibration behaviors, firmware workflows |
 | Controllers | Compact and extended joystick frames, revision-specific haptics and joystick calibration commands | Verify both controller revisions on hardware, including V2 calibration responses, remaining gestures and vibration patterns |
 | Streaming | Configurable VMC finger rotations and UDCAP VRChat OSC parameters | Verify VMC coordinates and exercise avatar output with live gloves |
 | SteamVR driver | OpenVR controller input, independent joints, complete 31-bone transforms, tracker selection by serial, pose-source telemetry, controller priority and haptic routing | Verify both hands in SteamVR and in games, including alignment and loss of tracking |
-| SteamVR dashboard | Device status, guided and manual calibration, joystick toggle, vibration test, alignment, presets and optional SteamVR-managed desktop startup | In-headset controls, desktop startup and shutdown on a running SteamVR installation, and the full first-party dashboard inventory |
+| SteamVR dashboard | Device status, guided and manual hand calibration, pairing, channel selection, joystick calibration and toggle, haptics, tracker selection, alignment, presets and optional SteamVR-managed desktop startup | In-headset controls, desktop startup and shutdown on a running SteamVR installation, and the full first-party dashboard inventory |
 | Firmware and distribution | Firmware version display, MCUboot file and payload-hash inspection, per-user install, upgrade and rollback, reversible SteamVR registration | Signature validation against a trusted key, firmware transfer and recovery, automatic application updates, and hardware regression checks |
 | Settings migration | Layer installed desktop and driver defaults, saved desktop preferences and UDCAP SteamVR settings | Compare the imported joystick range, finger response and tracker alignment on live hardware |
 
@@ -32,7 +32,7 @@ The Windows reference installation identifies its desktop executable and assembl
 | Streaming | OSC and VMC configuration and output | Verify message addresses, units, coordinate systems, update rate and receiver compatibility |
 | SteamVR driver | Register, expose two hand devices, update skeleton, inputs and haptics | Run SteamVR with the replacement and compare both hands and bindings in a game |
 | SteamVR dashboard | Device status, quick controls, offset and calibration actions, startup behavior | Open and exercise every action in-headset, then restart SteamVR |
-| Distribution | Install/update and enable/disable the SteamVR components, localize the supported workflows | Confirm a fresh Windows install, upgrade, removal, and restoration of UDCAP |
+| Distribution | Install/update and enable/disable the SteamVR components | Confirm a fresh Windows install, upgrade, removal, and restoration of UDCAP |
 
 ## Evidence
 

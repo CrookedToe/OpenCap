@@ -3,8 +3,10 @@
 
 #include <windows.h>
 #include <openvr_driver.h>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 using namespace opencap;
@@ -123,6 +125,36 @@ static void checkDemo(const wchar_t* path, TestOwner* owner = nullptr) {
         const auto right = sample.hands[1].jointOffsets[3];
         return right.x == 12 && right.y == -10 && right.z == 5 && sample.hands[0].jointOffsets[3].x == 0;
     }), "Joint correction applies only to the requested hand");
+    require(bus.send({Side::right, Action::togglePublishing}) && bus.send({Side::right, Action::toggleHaptics}),
+            "Send dashboard controller toggles");
+    require(waitFor([](const auto& sample) {
+        return !sample.settings[1].enabled && !sample.settings[1].haptics && sample.settings[0].enabled;
+    }), "Dashboard capability toggles apply to one hand");
+    TrackingSnapshot tracking;
+    tracking.heartbeat = now();
+    tracking.count = 2;
+    tracking.devices[0].index = 7;
+    tracking.devices[1].index = 8;
+    const std::string_view tracker1 = "QA-TRACKER-ONE", tracker2 = "QA-TRACKER-TWO";
+    std::copy(tracker1.begin(), tracker1.end(), tracking.devices[0].serial.begin());
+    std::copy(tracker2.begin(), tracker2.end(), tracking.devices[1].serial.begin());
+    require(bus.publishTracking(tracking), "Publish connected trackers");
+    for (const auto expected : {tracker1, tracker2, std::string_view{}}) {
+        require(bus.send({Side::right, expected.empty() ? Action::autoTracker : Action::cycleTracker}),
+                "Choose the next tracker or restore automatic selection");
+        require(waitFor([expected](const auto& sample) {
+            return sample.settings[1].tracker == noTracker && expected == sample.settings[1].trackerSerial.data();
+        }), "Dashboard stores the selected tracker's serial");
+    }
+    require(bus.send({Side::left, Action::pairBoth}) &&
+            waitFor([](const auto& sample) { return sample.hands[0].pairing && sample.hands[1].pairing; }),
+            "Start pairing for both gloves");
+    require(bus.send({Side::left, Action::pairBothStop}) &&
+            waitFor([](const auto& sample) { return !sample.hands[0].pairing && !sample.hands[1].pairing; }),
+            "Stop pairing for both gloves");
+    require(bus.send({Side::right, Action::channel, 20}) && bus.send({Side::left, Action::channel, 23}) &&
+            waitFor([](const auto& sample) { return sample.hands[0].channel == 23 && sample.hands[1].channel == 40; }),
+            "Apply a free radio channel and reject a channel in use by the other glove");
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -180,13 +212,25 @@ int wmain(int argc, wchar_t** argv) {
                 "Joint corrections enforce the supported angle limit");
         require(validButtonRange({.2f, .5f}) && !validButtonRange({.6f, .5f}) && !validButtonRange({.1f, 1.2f}),
                 "Touch and click thresholds must be ordered and normalized");
-        std::array<RawGloveSample, 3> observations{};
-        observations[0][4] = -38;
-        observations[1][4] = 17;
-        observations[2][5] = 9;
+        CalibrationSamples observations{};
+        observations[0][0] = -38;
+        observations[1][0] = 17;
+        observations[2][0] = 200;
+        observations[0][4] = -310;
+        observations[2][4] = 49;
+        observations[0][5] = 25;
+        observations[0][12] = 1000;
+        observations[1][12] = 2000;
         const auto spans = calibrationSpans(observations);
-        require(spans.measured && spans.counts[0] == 55 && spans.counts[1] == 9 && spans.lowChannels == 11,
-                "Measure the raw calibration span and flag channels below the supported floor");
+        require(spans.measured && spans.counts[0] == 55 && spans.counts[4] == 49 &&
+                spans.counts[5] == 25 && spans.lowChannels == 10,
+                "Use the corresponding bend and splay poses and exclude auxiliary inputs from quality");
+        std::ostringstream report;
+        writeCalibrationReport(report, Side::right, observations);
+        require(report.view().find("right,flexion,4,-38,17,200,55,measured") != std::string_view::npos &&
+                report.view().find("right,splay,8,-310,0,49,49,measured") != std::string_view::npos &&
+                report.view().find("right,auxiliary,1,1000,2000,0,,") != std::string_view::npos,
+                "Export the selected hand's original sensor captures and movement readings as CSV");
         StickHold hold;
         auto alignment = std::array<HandSettings, handCount>{};
         alignment[0].tracker = 8;
