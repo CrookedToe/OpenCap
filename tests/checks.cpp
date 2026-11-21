@@ -122,6 +122,13 @@ int wmain(int argc, wchar_t** argv) {
                 "Joint corrections enforce the supported angle limit");
         require(validButtonRange({.2f, .5f}) && !validButtonRange({.6f, .5f}) && !validButtonRange({.1f, 1.2f}),
                 "Touch and click thresholds must be ordered and normalized");
+        std::array<RawGloveSample, 3> observations{};
+        observations[0][4] = -38;
+        observations[1][4] = 17;
+        observations[2][5] = 9;
+        const auto spans = calibrationSpans(observations);
+        require(spans.measured && spans.counts[0] == 55 && spans.counts[1] == 9 && spans.lowChannels == 11,
+                "Measure the raw calibration span and flag channels below the supported floor");
         StickHold hold;
         auto alignment = std::array<HandSettings, handCount>{};
         alignment[0].tracker = 8;

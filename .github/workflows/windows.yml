@@ -20,10 +20,23 @@ jobs:
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
       - name: Build all components
         run: cmake --build build --config Release --parallel
-      - name: Verify session and pose behavior
+      - name: Run automated checks
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Install package
         run: cmake --install build --config Release --prefix out/OpenCap
+      - name: Verify per-user installer and rollback
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'OpenCap-Install-Check'
+          $installer = './out/OpenCap/Install-OpenCap.ps1'
+          & $installer -Destination $dest -SkipShortcut
+          if (!(Test-Path -LiteralPath (Join-Path $dest 'OpenCap.exe'))) { throw 'Install did not create the desktop app.' }
+          & $installer -Destination $dest -SkipShortcut
+          & $installer -Destination $dest -SkipShortcut -Action Rollback
+          & $installer -Destination $dest -SkipShortcut -Action Remove
+          if ((Test-Path -LiteralPath $dest) -or (Test-Path -LiteralPath "$dest.previous")) {
+            throw 'Removal left a package directory.'
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: OpenCap-Windows-x64

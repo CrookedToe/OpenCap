@@ -31,7 +31,7 @@ enum Control {
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
     applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
-    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan
+    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage
 };
 
 struct CalibrationControl {
@@ -220,6 +220,7 @@ private:
         edit(oscIp, 314, 654, 174);
         edit(oscPort, 499, 654, 77);
         button(applyStream, L"Apply streaming", 592, 651, 167);
+        button(inspectImage, L"Inspect firmware image…", 683, 716, 206);
         showStream();
         if (prefs_.hotkey && !RegisterHotKey(window_, 1, MOD_NOREPEAT, VK_F1)) prefs_.hotkey = false;
         CheckDlgButton(window_, globalHotkey, prefs_.hotkey ? BST_CHECKED : BST_UNCHECKED);
@@ -313,6 +314,7 @@ private:
         const auto& hand = snapshot_.hands[side_];
         switch (id) {
         case importUdcap: importSettings(); break;
+        case inspectImage: showFirmwareImage(window_); break;
         case useTrackingPlan:
             usePreset(static_cast<std::size_t>(SendDlgItemMessageW(window_, trackingPlan, CB_GETCURSEL, 0, 0)));
             break;

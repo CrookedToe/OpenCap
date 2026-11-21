@@ -14,5 +14,6 @@ std::wstring widen(std::string_view value);
 void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
                   const Snapshot& snapshot, std::size_t side, const std::wstring& status);
 std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand);
+void showFirmwareImage(HWND owner);
 int runDesktop(HINSTANCE instance, int show, bool demo, const std::wstring& session, bool isolated);
 }

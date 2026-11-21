@@ -116,24 +116,33 @@ public:
             case Action::startHand:
                 if (stage == 4) throw std::runtime_error("Finish the joystick calibration first.");
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+                capturedRaw_.fill(false);
                 stage = 1;
                 break;
             case Action::fist:
                 if (stage == 1) {
                     core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_FIST);
+                    captureRaw(0);
                     stage = 2;
                 }
                 break;
             case Action::together:
                 if (stage == 2) {
                     core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION);
+                    captureRaw(1);
                     stage = 3;
                 }
                 break;
             case Action::spread:
                 if (stage == 3) {
                     core_.captureCalibrationData(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
+                    captureRaw(2);
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+                    {
+                        std::lock_guard lock(mutex_);
+                        sample_.quality = std::ranges::all_of(capturedRaw_, [](bool present) { return present; })
+                            ? calibrationSpans(calibrationRaw_) : CalibrationSpans{};
+                    }
                     stage = 0;
                     save();
                 }
@@ -212,6 +221,14 @@ public:
     }
 
 private:
+    void captureRaw(std::size_t step) {
+        std::lock_guard lock(mutex_);
+        const auto time = now();
+        if (!sample_.lastFrame || time - sample_.lastFrame > sampleTimeout) return;
+        calibrationRaw_[step] = latestRaw_;
+        capturedRaw_[step] = true;
+    }
+
     void readButtonRanges() {
         const ButtonRanges ranges{{{core_.getTriggerButtonMin(), core_.getTriggerButtonMax()},
             {core_.getGripButtonMin(), core_.getGripButtonMax()}, {core_.getTrackpadButtonMin(), core_.getTrackpadButtonMax()}}};
@@ -292,6 +309,7 @@ private:
             break;
         case CMD_DATA: {
             const auto time = now();
+            latestRaw_ = packet.angle;
             sample_.linked = true;
             sample_.lastFrame = time;
             if (fpsStart_ == 0) fpsStart_ = time;
@@ -362,6 +380,9 @@ private:
     Hand sample_;
     Millis fpsStart_{};
     int frames_{};
+    RawGloveSample latestRaw_{};
+    std::array<RawGloveSample, 3> calibrationRaw_{};
+    std::array<bool, 3> capturedRaw_{};
     std::string loadedSerial_;
     std::uint64_t loadedRevision_{};
     UdCapV1Core core_;

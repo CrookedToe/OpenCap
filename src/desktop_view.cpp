@@ -1,5 +1,6 @@
 #include "desktop_view.hpp"
 #include "bridge.hpp"
+#include "firmware_image.hpp"
 
 #include <commdlg.h>
 #include <filesystem>
@@ -85,6 +86,9 @@ void paintDesktop(HWND window, HBRUSH background, HFONT font, HFONT title,
     text(dc, 30, 476, std::format(L"Trigger {:.0f}%   Grip {:.0f}%   Trackpad {:.0f}%",
          100*hand.trigger, 100*hand.grip, 100*hand.pad));
     text(dc, 30, 498, std::format(L"Stick {:+.2f}, {:+.2f}   ·   Buttons 0x{:02X}", hand.stickX, hand.stickY, hand.buttons));
+    if (active && hand.quality.measured)
+        text(dc, 30, 568, std::format(L"Calibration  ·  {} of {} channels below 10 counts",
+                    hand.quality.lowChannels, hand.quality.counts.size()), accent);
     text(dc, 422, 208, hand.calibrated ? L"CALIBRATION  /  READY" : L"CALIBRATION", accent);
     text(dc, 422, 363, hand.channel >= 0 ? std::format(L"Channel {}", hand.channel) : L"Channel —");
     text(dc, 422, 451, L"TRACKER ALIGNMENT", accent);
@@ -133,4 +137,30 @@ std::optional<bool> exportHandSample(HWND window, Side side, const Hand& hand) {
     return static_cast<bool>(output);
 }
 
+void showFirmwareImage(HWND owner) {
+    wchar_t selected[1024]{};
+    OPENFILENAMEW request{};
+    request.lStructSize = sizeof(request);
+    request.hwndOwner = owner;
+    request.lpstrFile = selected;
+    request.nMaxFile = static_cast<DWORD>(std::size(selected));
+    request.lpstrFilter = L"Firmware images\0*.bin\0All files\0*.*\0\0";
+    request.lpstrTitle = L"Inspect a UDCAP firmware image";
+    request.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&request)) return;
+    try {
+        const std::filesystem::path path(selected);
+        const auto image = readFirmware(path);
+        constexpr std::array targets{L"Unknown", L"Receiver", L"Left glove", L"Right glove"};
+        const auto target = targets[static_cast<std::size_t>(firmwareTarget(path))];
+        const auto scheme = image.signature == ImageSignature::rsa2048 ? L"RSA-2048" : L"ECDSA P-256";
+        const auto message = std::format(L"{}\n\nTarget indicated by filename  {}\nImage version  {}.{}.{}+{}\n"
+            L"Payload  {} bytes\nSHA-256  matches\nSignature record  {}\n\nThis inspection checks the file structure and payload hash.",
+            path.filename().wstring(), target, image.major, image.minor, image.revision, image.build,
+            image.payloadBytes, scheme);
+        MessageBoxW(owner, message.c_str(), L"OpenCap firmware image", MB_OK | MB_ICONINFORMATION);
+    } catch (const std::exception& error) {
+        MessageBoxW(owner, widen(error.what()).c_str(), L"OpenCap firmware image", MB_OK | MB_ICONERROR);
+    }
+}
 }

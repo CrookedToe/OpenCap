@@ -15,6 +15,10 @@ cmake --install build --config Release --prefix out/OpenCap
 
 Use `-DOPENCAP_RECEIVER=OFF` for a build without hardware transport, or pass `-DOPENVR_SDK_ROOT=C:\path\to\openvr` to build against an existing SDK checkout. Start `OpenCap.exe --demo` to exercise the desktop and shared commands with simulated data. Settings are stored under `%LOCALAPPDATA%\OpenCap`, with separate settings for demo mode.
 
+## Install and upgrade
+
+Run `Install-OpenCap.ps1` from an extracted Windows package to install it for the current Windows user and add a Start menu shortcut. Close the desktop and dashboard and stop SteamVR before replacing an installed package. Run the script from a newly extracted package to upgrade. `-Action Rollback` restores the previous package and `-Action Remove` removes the installed application. The SteamVR registration commands below apply to the chosen installation directory.
+
 ## Try with SteamVR
 
 OpenCap imports compatible settings from an installed UDCAP driver on the first normal launch. It layers your saved UDCAP desktop settings and the active UDCAP SteamVR settings over the installed defaults. **Import UDCAP settings** refreshes those values. Keep your existing glove pairing and power on each glove so OpenCap can apply its controller preferences.
@@ -30,6 +34,8 @@ The import covers joystick center, range and dead zone, trigger, grip and trackp
 Use **Controller** to set per-hand button assignments and touch and click thresholds, **Joint correction** for finger adjustments, and **Open hand viewer** for an orbitable model and live joint data. Enable **Hold stick to toggle joystick** to use the five-second shortcut while wearing the gloves. F1 starts guided calibration in the desktop window. Enable the F1 checkbox to use it while another program is focused.
 
 The tracker presets apply starting offsets for VIVE Tracker, Tundra Tracker, Quest controller, or VIVE Ultimate Tracker. They preserve your tracker assignments. You can select the same presets in the SteamVR dashboard.
+
+After completing hand calibration, the hand viewer's data mode shows the measured span for each of the 12 sensor channels. It highlights channels whose span was below 10 counts. **Inspect firmware image** reads the version and checks the payload hash of a UDCAP MCUboot file. Firmware transfers and recovery are tracked in [issue #4](https://github.com/CrookedToe/OpenCap/issues/4).
 
 To remove the driver, run the registration script with `-Remove`. Add `-Dashboard` while SteamVR is running to remove dashboard registration too. Restore the UDCAP add-on in SteamVR if switching back.
 

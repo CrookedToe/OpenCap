@@ -1,9 +1,23 @@
 #include "model.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
 namespace opencap {
+CalibrationSpans calibrationSpans(const std::array<RawGloveSample, 3>& samples) {
+    CalibrationSpans result;
+    result.measured = true;
+    for (std::size_t i = 0; i < result.counts.size(); ++i) {
+        const auto input = i + 4;
+        const auto [minimum, maximum] = std::minmax({samples[0][input], samples[1][input], samples[2][input]});
+        const auto span = static_cast<std::uint16_t>(static_cast<int>(maximum) - minimum);
+        result.counts[i] = span;
+        if (span < 10) ++result.lowChannels;
+    }
+    return result;
+}
+
 bool applyTrackingPreset(std::array<HandSettings, handCount>& hands, std::size_t preset) {
     if (preset >= trackingPresets.size()) return false;
     for (std::size_t i = 0; i < hands.size(); ++i) {

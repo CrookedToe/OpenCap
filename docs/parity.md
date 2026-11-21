@@ -7,12 +7,12 @@ The Windows reference installation identifies its desktop executable and assembl
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
 | Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and channel scan |
-| Calibration | Three-pose captures, joystick center and range, saved glove calibration, and timed voice-guided calibration from F1 or the glove power button | Physical pose comparisons, guide timing, calibration quality and export format |
-| Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, joint corrections, per-hand toggles, four UDCAP tracker presets, CSV sample export | Controller revision 2.0 and additional remapping and vibration behaviors, calibration quality and localization |
+| Calibration | Three-pose captures, saved joystick center and range, timed voice guidance, and raw sensor spans from the last successful captures | Restore three-pose sensor calibration across restarts, match the first-party quality labels and export format, and compare physical poses |
+| Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, five-second joystick shortcut, joint corrections, four UDCAP tracker presets and CSV sample export | Controller revision 2.0 and additional remapping and vibration behaviors, firmware workflows and localization |
 | Streaming | Configurable VMC finger rotations and UDCAP VRChat OSC parameters | Verify VMC coordinates and exercise avatar output with live gloves |
 | SteamVR driver | OpenVR controller input, independently articulated joint poses, complete 31-bone transforms, tracker poses, controller priority and haptic routing | Verify both hands in SteamVR and in games, including alignment and loss of tracking |
 | SteamVR dashboard | Device status, guided and manual calibration, joystick toggle, vibration test, alignment and presets | In-headset controls, overlay startup and the full first-party dashboard inventory |
-| Firmware and distribution | Firmware version display, reversible SteamVR registration script | Firmware update and recovery, updater and installer, hardware and runtime regression checks |
+| Firmware and distribution | Firmware version display, MCUboot file and payload-hash inspection, per-user install, upgrade and rollback, reversible SteamVR registration | Signature validation against a trusted key, firmware transfer and recovery, automatic application updates, and hardware regression checks |
 | Settings migration | Layer installed desktop and driver defaults, saved desktop preferences and UDCAP SteamVR settings | Compare the imported joystick range, finger response and tracker alignment on live hardware |
 
 ## Acceptance matrix
