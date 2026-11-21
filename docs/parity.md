@@ -2,6 +2,20 @@
 
 The Windows reference installation identifies its desktop executable and assembly as 0.1.8.7. The SteamVR package is registered as `udcap`. The installation includes two overlay executables and a separate Unity hand viewer. Test the behavior of each workflow against the corresponding first-party component and record the hardware and software versions used.
 
+## Current build
+
+| Area | Implemented | Acceptance still needed |
+| --- | --- | --- |
+| Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and channel scan |
+| Calibration | Three-pose captures, joystick center and range, saved glove calibration, power-button and F1 entry | Physical pose comparisons, guided timing and voice prompts, calibration quality and export format |
+| Desktop | Live hand diagram and controller readings, device toggles, tracker offsets, CSV sample export | Detachable 3D viewer, preset tracking profiles, controller mapping, gestures, per-joint tuning and localization |
+| Streaming | Configurable VMC finger rotations and OpenCap OSC curl messages | Verify VMC coordinates and compare UDCAP's VRChat parameter encoding |
+| SteamVR driver | OpenVR provider, controller input, 31-bone curl/splay model, tracker transforms and haptic routing | Runtime and game bindings, pose alignment, independent joint articulation and device priority behavior |
+| SteamVR dashboard | Device status, calibration controls, joystick toggle, vibration test and tracker offsets | In-headset controls, overlay startup and the full first-party dashboard inventory |
+| Firmware and distribution | Firmware version display, reversible SteamVR registration script | Firmware update and recovery, updater and installer, hardware and runtime regression checks |
+
+## Acceptance matrix
+
 | Area | Reference behavior to match | Acceptance check |
 | --- | --- | --- |
 | Receiver | Detect left, right, combined, and supported wired receivers; recover after unplug and sleep | Connect and reconnect each supported receiver and glove combination without restarting the app |

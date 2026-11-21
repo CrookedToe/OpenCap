@@ -1,0 +1,14 @@
+{
+  "source": "builtin",
+  "applications": [
+    {
+      "app_key": "opencap.dashboard",
+      "launch_type": "binary",
+      "binary_path_windows": "OpenCapDashboard.exe",
+      "is_dashboard_overlay": true,
+      "strings": {
+        "en_us": { "name": "OpenCap", "description": "Inspect and calibrate UDCAP gloves in SteamVR." }
+      }
+    }
+  ]
+}
