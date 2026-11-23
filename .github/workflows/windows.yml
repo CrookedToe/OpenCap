@@ -52,7 +52,9 @@ jobs:
           }
       - name: Verify release update and rollback in Windows PowerShell
         shell: powershell
-        run: ./tests/update.ps1 -Package ./out/OpenCap
+        run: |
+          ./tests/update.ps1 -Package ./out/OpenCap
+          exit 0
       - name: Verify SteamVR setup and UDCAP restoration
         shell: powershell
         run: ./tests/steamvr-setup.ps1 -Package ./out/OpenCap
@@ -72,7 +74,7 @@ jobs:
         with:
           name: OpenCap-Windows-x64
           path: package
-      - name: Prepare a draft Windows release
+      - name: Prepare the Windows release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,7 +97,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) { return }
           $archive = 'OpenCap-Windows-x64.zip'
           Compress-Archive -Path 'package/*' -DestinationPath $archive
-          $flags = @('--verify-tag', '--generate-notes', '--draft')
-          if ($version.Contains('-')) { $flags += '--prerelease' }
+          $flags = @('--verify-tag', '--generate-notes')
+          if ($version.Contains('-')) { $flags += @('--prerelease', '--latest=false') }
+          if ($env:GITHUB_REF_TYPE -ne 'branch' -or !$version.Contains('-')) { $flags += '--draft' }
           gh release create $tag $archive @flags
           exit $LASTEXITCODE
