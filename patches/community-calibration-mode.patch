@@ -1,0 +1,27 @@
+--- a/src/UdCapV1Core.h
++++ b/src/UdCapV1Core.h
+@@ -383,7 +383,7 @@
+     void completeCalibration(UdCapV1DeviceCaliType type);
+ 
+     void tryRestoreHandCalibration();
+-    void enableLiveHandCalibration(const std::string &serial);
++    void configureHandCalibration(const std::string &serial, bool automatic);
+     std::optional<opencap::SensorRange> liveHandRange() const;
+ 
+     using CalibrationSamples = std::array<std::array<int16_t, 19>, 3>;
+--- a/src/UdCapV1Core.cpp
++++ b/src/UdCapV1Core.cpp
+@@ -1177,9 +1177,11 @@
+     }
+ }
+ 
+-void UdCapV1Core::enableLiveHandCalibration(const std::string &serial) {
++void UdCapV1Core::configureHandCalibration(const std::string &serial, bool automatic) {
+     std::lock_guard guard(stateMutex);
+-    if (udCapSerial == serial && udState == UD_INIT_STATE_LINKED) liveEnabled = true;
++    if (udCapSerial != serial || udState != UD_INIT_STATE_LINKED) return;
++    liveHand.setLearning(automatic);
++    liveEnabled = true;
+ }
+ 
+ std::optional<opencap::SensorRange> UdCapV1Core::liveHandRange() const {

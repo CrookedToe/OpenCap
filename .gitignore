@@ -1,0 +1,14 @@
+/.opencap-git/
+/build*/
+/out/
+/OpenCap-Windows/
+/.vs/
+*.user
+*.log
+*.csv
+calibration-*.jsonl
+*.bin
+*.exe
+*.dll
+*.pdb
+*.zip

@@ -1,0 +1,27 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "udcap",
+  "compatibility_mode_controller_type": "knuckles",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/pose/raw": {"type": "pose"},
+    "/input/skeleton/left": {"type": "skeleton", "skeleton": "/skeleton/hand/left", "side": "left"},
+    "/input/skeleton/right": {"type": "skeleton", "skeleton": "/skeleton/hand/right", "side": "right"},
+    "/input/a": {"type": "button", "click": true, "touch": false},
+    "/input/b": {"type": "button", "click": true, "touch": false},
+    "/input/system": {"type": "button", "click": true, "touch": false},
+    "/input/joystick": {"type": "joystick", "click": true, "touch": false},
+    "/input/thumbstick": {"type": "joystick", "click": true, "touch": false},
+    "/input/trigger": {"type": "trigger", "click": true, "touch": true, "value": true},
+    "/input/grip": {"type": "trigger", "click": true, "touch": true, "value": true, "force": true},
+    "/input/grab": {"type": "button", "click": true, "touch": false},
+    "/input/pinch": {"type": "button", "click": true, "touch": false},
+    "/input/trackpad": {"type": "trackpad", "click": true, "touch": true, "force": true},
+    "/output/haptic": {"type": "vibration"},
+    "/input/finger/thumb": {"type": "trigger", "click": false, "touch": false, "value": true},
+    "/input/finger/index": {"type": "trigger", "click": false, "touch": false, "value": true},
+    "/input/finger/middle": {"type": "trigger", "click": false, "touch": false, "value": true},
+    "/input/finger/ring": {"type": "trigger", "click": false, "touch": false, "value": true},
+    "/input/finger/pinky": {"type": "trigger", "click": false, "touch": false, "value": true}
+  }
+}

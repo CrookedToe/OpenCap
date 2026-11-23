@@ -1,0 +1,84 @@
+--- a/src/UdCapV1Core.h
++++ b/src/UdCapV1Core.h
+@@ -152,6 +152,9 @@
+     bool isReady;
+     bool isEnterprise;
+     std::array<int16_t, 19> angle;
++    unsigned sensorCount{};
++    int64_t sensorTimeUs{};
++    bool automaticCalibration{};
+     std::optional<opencap::SensorRange> liveRange;
+     std::array<double, 28> result;
+     // Snapshot accompanying CMD_ANGLE. Scalar protocols project supported axes;
+@@ -371,11 +374,12 @@
+ 
+     void mcuSendHaptic(float seconds, float amplitude, float frequency);
+     void mcuTestHaptic(bool second);
++    void mcuTriggerClick();
+     unsigned getControllerRevision() const;
+ 
+     void runCalibration(UdCapV1DeviceCaliType type);
+ 
+-    void captureCalibrationData(UdCapV1HandCaliType type);
++    opencap::SensorFrame captureCalibrationData(UdCapV1HandCaliType type);
+ 
+     void clearCalibrationData(UdCapV1HandCaliType type);
+ 
+@@ -469,7 +473,7 @@
+     bool communityCalibrationNeedsReset = true;
+     UdCapV1HandData lastAngle{};
+     void setCalibrationPose(UdCapV1HandCaliType type, const std::array<int16_t, 19> &sample);
+-    std::array<int16_t, 19> lastRaw{};
++    opencap::SensorFrame lastRaw{};
+     bool controllerPresent = false;
+     unsigned controllerRevision = 0;
+     bool joystickDeviceCalibration = false;
+--- a/src/UdCapV1Core.cpp
++++ b/src/UdCapV1Core.cpp
+@@ -456,7 +456,10 @@
+             auto value = (int16_t) ((deData[i] << 8) | deData[i + 1]);
+             iData[i / 2] = value;
+         }
+-        lastRaw = iData;
++        lastRaw = {iData, static_cast<unsigned>(data.size() / 2), opencap::sensorTimeUs()};
++        packet.sensorCount = lastRaw.count;
++        packet.sensorTimeUs = lastRaw.timeUs;
++        packet.automaticCalibration = liveHand.learning();
+         packet.angle = iData;
+         if (liveEnabled && udState == UD_INIT_STATE_LINKED && caliStat != UDCAP_V1_HAND_CALI_STAT_AUTO)
+             packet.liveRange = liveHand.update(iData);
+@@ -921,6 +924,13 @@
+     return controllerRevision;
+ }
+ 
++void UdCapV1Core::mcuTriggerClick() {
++    std::lock_guard guard(stateMutex);
++    if (udState != UD_INIT_STATE_LINKED || controllerRevision == 0) return;
++    if (controllerRevision == 2) mcuSendHaptic(.04f, .25f, 100);
++    else sendCommand(1, CMD_VIBRATION, {2, 0, 4, 5}); // Motor 1, four 10 ms ticks.
++}
++
+ void UdCapV1Core::mcuTestHaptic(bool second) {
+     std::lock_guard guard(stateMutex);
+     if (controllerRevision != 2) {
+@@ -1027,7 +1037,7 @@
+     }
+ }
+ 
+-void UdCapV1Core::captureCalibrationData(UdCapV1HandCaliType type) {
++opencap::SensorFrame UdCapV1Core::captureCalibrationData(UdCapV1HandCaliType type) {
+     std::lock_guard guard(stateMutex);
+     if (udState != UD_INIT_STATE_LINKED) {
+         throw std::runtime_error("Core not initialized");
+@@ -1041,8 +1051,9 @@
+     if (type < UDCAP_V1_HAND_CALI_TYPE_FIST || type > UDCAP_V1_HAND_CALI_TYPE_PROTRACT) {
+         throw std::runtime_error("Invalid calibration type");
+     }
+-    pendingCalibration[type - UDCAP_V1_HAND_CALI_TYPE_FIST] = lastRaw;
+-    setCalibrationPose(type, lastRaw);
++    pendingCalibration[type - UDCAP_V1_HAND_CALI_TYPE_FIST] = lastRaw.values;
++    setCalibrationPose(type, lastRaw.values);
++    return lastRaw;
+ }
+ 
+ void UdCapV1Core::setCalibrationPose(UdCapV1HandCaliType type, const std::array<int16_t, 19> &s) {
