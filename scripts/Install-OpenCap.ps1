@@ -302,6 +302,7 @@ if ($Action -in @('CheckForUpdate', 'Update')) {
                 Stop-GloveApps $false $destinationPath
             }
             $installer = Join-Path $package 'Install-OpenCap.ps1'
+            Unblock-File -LiteralPath $installer
             & $installer -Action Install -Destination $destinationPath -SkipShortcut:$SkipShortcut -ExpectedVersion $current.Text
         } finally {
             try {
@@ -367,6 +368,11 @@ try {
                 }
                 if (-not (Test-Package $stagePath)) { throw 'The staged installation is incomplete.' }
                 Assert-ManagedFolder $stagePath
+                # These package scripts run later from the installed directory under RemoteSigned.
+                foreach ($script in 'Install-OpenCap.ps1', 'SteamVRSession.ps1') {
+                    $installedScript = Join-Path $stagePath $script
+                    if (Test-Path -LiteralPath $installedScript -PathType Leaf) { Unblock-File -LiteralPath $installedScript }
+                }
                 Remove-ManagedFolder $previousPath
                 if (Test-Path -LiteralPath $destinationPath -PathType Container) {
                     Assert-ManagedFolder $destinationPath

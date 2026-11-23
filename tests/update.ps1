@@ -42,9 +42,20 @@ function Invoke-WebRequest($Uri, $OutFile, $UserAgent, [switch]$UseBasicParsing,
 }
 
 try {
-    $installer = Join-Path $packagePath 'Install-OpenCap.ps1'
     $existing = (Get-Content -LiteralPath (Join-Path $packagePath 'OpenCap.version') -Raw).Trim()
+    $installationSource = Join-Path $root 'downloaded'
+    Copy-Item -LiteralPath $packagePath -Destination $installationSource -Recurse
+    $installer = Join-Path $installationSource 'Install-OpenCap.ps1'
+    foreach ($file in 'Install-OpenCap.ps1', 'SteamVRSession.ps1') {
+        Set-Content -LiteralPath (Join-Path $installationSource $file) -Stream Zone.Identifier -Value @('[ZoneTransfer]', 'ZoneId=3')
+    }
+    # The supported setup entry point runs the installer after the user approves it.
+    Unblock-File -LiteralPath $installer
     & $installer -Action Install -Destination $destination -SkipShortcut | Out-Null
+    $sessionScript = Join-Path $destination 'SteamVRSession.ps1'
+    if (Get-Item -LiteralPath $sessionScript -Stream Zone.Identifier -ErrorAction SilentlyContinue) {
+        throw 'The installed script cannot run under RemoteSigned after extracting a browser download.'
+    }
     $newPackage = Join-Path $root 'release'
     Copy-Item -LiteralPath $packagePath -Destination $newPackage -Recurse
     Set-Content -LiteralPath (Join-Path $newPackage 'OpenCap.version') -Value $version -Encoding ascii
