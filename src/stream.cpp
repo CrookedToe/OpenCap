@@ -11,8 +11,12 @@ namespace opencap {
 namespace {
 using Packet = std::vector<char>;
 constexpr std::array sides{"Left", "Right"};
-constexpr std::array fingers{"Thumb", "Index", "Middle", "Ring", "Little"};
+constexpr std::array fingers{"Index", "Middle", "Ring", "Little", "Thumb"};
 constexpr std::array joints{"Proximal", "Intermediate", "Distal"};
+constexpr std::array neutralBones{"Hips", "UpperLeg", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg",
+    "RightLowerLeg", "Foot", "Spine", "Chest", "Neck", "Head", "Shoulder", "LeftShoulder", "RightShoulder",
+    "UpperArm", "LeftUpperArm", "RightUpperArm", "LowerArm", "LeftLowerArm", "RightLowerArm",
+    "Hand", "LeftHand", "RightHand", "Eye", "LeftEye"};
 
 void word(Packet& packet, std::string_view value) {
     packet.insert(packet.end(), value.begin(), value.end());
@@ -25,19 +29,6 @@ void number(Packet& packet, std::uint32_t value) {
 
 void scalar(Packet& packet, float value) { number(packet, std::bit_cast<std::uint32_t>(value)); }
 
-Packet bundle() {
-    Packet result;
-    word(result, "#bundle");
-    number(result, 0);
-    number(result, 1);
-    return result;
-}
-
-void append(Packet& container, const Packet& message) {
-    number(container, static_cast<std::uint32_t>(message.size()));
-    container.insert(container.end(), message.begin(), message.end());
-}
-
 Packet status(bool active) {
     Packet packet;
     word(packet, "/avatar/parameters/HandTrack");
@@ -45,23 +36,14 @@ Packet status(bool active) {
     return packet;
 }
 
-Packet vmcHand(const Hand& hand, std::size_t side) {
-    auto packet = bundle();
-    for (std::size_t f = 0; f < fingers.size(); ++f) {
-        for (std::size_t j = 0; j < joints.size(); ++j) {
-            Packet message;
-            word(message, "/VMC/Ext/Bone/Pos");
-            word(message, ",sfffffff");
-            word(message, std::string(sides[side]) + fingers[f] + joints[j]);
-            scalar(message, 0);
-            scalar(message, 0);
-            scalar(message, 0);
-            const auto q = normalize(hand.joints[3*f+j].rotation);
-            for (const float component : {q.x, q.y, q.z, q.w}) scalar(message, component);
-            append(packet, message);
-        }
-    }
-    return packet;
+Packet vmcBone(std::string_view name, Quaternion rotation) {
+    Packet message;
+    word(message, "/VMC/Ext/Bone/Pos");
+    word(message, ",sfffffff");
+    word(message, name);
+    for (const auto value : {0.0f, 0.0f, 0.0f, rotation.x, rotation.y, rotation.z, rotation.w})
+        scalar(message, value);
+    return message;
 }
 
 }
@@ -89,9 +71,45 @@ struct Stream::Impl {
                reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
     }
 
+    void sendVmc(const Snapshot& snapshot, const std::array<bool, handCount>& live) const {
+        if (!vmc.sin_port || (!live[0] && !live[1] && !vmcWasLive)) return;
+        auto samples = snapshot.hands;
+        for (std::size_t side = 0; side < handCount; ++side) {
+            if (!live[side]) samples[side] = {};
+            if (!snapshot.settings[side].joystick) {
+                samples[side].stickX = samples[side].stickY = 0;
+                samples[side].buttons &= ~bit(Button::stick);
+            }
+        }
+        for (const auto name : neutralBones) transmit(vmcBone(name, {}), vmc);
+        for (std::size_t side = 0; side < handCount; ++side) {
+            const auto rotations = vmcFingerRotations(samples[side], static_cast<Side>(side));
+            const std::string prefix = sides[side];
+            for (std::size_t f = 0; f < fingers.size(); ++f) {
+                for (std::size_t j = 0; j < joints.size(); ++j)
+                    transmit(vmcBone(prefix + fingers[f] + joints[j], rotations[3*f+j]), vmc);
+            }
+        }
+        for (std::size_t side = 0; side < handCount; ++side) {
+            for (const auto& input : vmcControllerInputs(samples[side])) {
+                Packet message;
+                word(message, "/VMC/Ext/Blend/Val");
+                word(message, ",sf");
+                word(message, std::string(sides[side]) + std::string(input.control));
+                scalar(message, input.value);
+                transmit(message, vmc);
+            }
+        }
+        Packet apply;
+        word(apply, "/VMC/Ext/Blend/Apply");
+        word(apply, ",");
+        transmit(apply, vmc);
+    }
+
     bool started{};
     SOCKET socket{INVALID_SOCKET};
     sockaddr_in vmc{}, osc{};
+    bool vmcWasLive{};
     bool oscWasLive{};
     Millis lastOscRefresh{};
     std::array<std::array<unsigned, avatarParameterCount>, handCount> previousBits{};
@@ -108,10 +126,12 @@ bool Stream::configure(const StreamSettings& settings) {
         InetPtonA(AF_INET, settings.oscAddress.c_str(), &osc.sin_addr) != 1) return false;
     if ((settings.vmcPort || settings.oscPort) && impl_->socket == INVALID_SOCKET) return false;
     if (impl_->oscWasLive) impl_->transmit(status(false), impl_->osc);
+    if (impl_->vmcWasLive) impl_->sendVmc({}, {});
     vmc.sin_port = htons(static_cast<u_short>(settings.vmcPort));
     osc.sin_port = htons(static_cast<u_short>(settings.oscPort));
     impl_->vmc = vmc;
     impl_->osc = osc;
+    impl_->vmcWasLive = false;
     impl_->oscWasLive = false;
     impl_->lastOscRefresh = 0;
     return true;
@@ -120,12 +140,13 @@ bool Stream::configure(const StreamSettings& settings) {
 void Stream::send(const Snapshot& snapshot) {
     if (!impl_->vmc.sin_port && !impl_->osc.sin_port) return;
     bool active = false;
+    std::array<bool, handCount> live{};
     const bool refresh = !impl_->oscWasLive || snapshot.heartbeat - impl_->lastOscRefresh >= 1000;
     for (std::size_t i = 0; i < handCount; ++i) {
         const auto& hand = snapshot.hands[i];
         if (!hand.calibrated || !isLive(snapshot, static_cast<Side>(i), snapshot.heartbeat)) continue;
+        live[i] = true;
         active = true;
-        if (impl_->vmc.sin_port) impl_->transmit(vmcHand(hand, i), impl_->vmc);
         if (!impl_->osc.sin_port) continue;
         const auto parameters = avatarParameters(snapshot, static_cast<Side>(i));
         for (std::size_t control = 0; control < parameters.size(); ++control) {
@@ -142,6 +163,8 @@ void Stream::send(const Snapshot& snapshot) {
             }
         }
     }
+    impl_->sendVmc(snapshot, live);
+    impl_->vmcWasLive = active;
     if (impl_->osc.sin_port && (impl_->oscWasLive != active || (active && refresh))) {
         impl_->transmit(status(active), impl_->osc);
         impl_->lastOscRefresh = snapshot.heartbeat;

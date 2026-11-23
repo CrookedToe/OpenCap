@@ -2,29 +2,49 @@
 #include "desktop_preferences.hpp"
 
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include <openvr.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <filesystem>
 #include <format>
+#include <span>
 #include <stdexcept>
 #include <string_view>
-#include <utility>
+#include <vector>
 
 namespace {
 using namespace opencap;
-constexpr int width = 900, height = 610;
+constexpr int width = 1120, height = 612;
 constexpr char key[] = "opencap.dashboard";
-constexpr COLORREF background = RGB(17, 27, 40);
-constexpr COLORREF foreground = RGB(234, 242, 248);
-constexpr COLORREF muted = RGB(151, 173, 187);
-constexpr COLORREF accent = RGB(96, 224, 201);
-constexpr COLORREF panel = RGB(31, 48, 65);
+constexpr COLORREF background = RGB(13, 21, 31);
+constexpr COLORREF surface = RGB(24, 37, 52);
+constexpr COLORREF border = RGB(44, 63, 80);
+constexpr COLORREF foreground = RGB(244, 249, 251);
+constexpr COLORREF muted = RGB(169, 187, 201);
+constexpr COLORREF accent = RGB(103, 229, 204);
+constexpr COLORREF accentInk = RGB(10, 35, 35);
+constexpr COLORREF warning = RGB(255, 198, 126);
+constexpr Millis commandWait = 1500;
+
+constexpr RECT desktopButton{868, 35, 1080, 93};
+constexpr std::array<RECT, handCount> gloveCards{{{40, 128, 548, 350}, {572, 128, 1080, 350}}};
+constexpr RECT calibrationCard{40, 374, 1080, 574};
+constexpr RECT bothButton{800, 416, 1056, 475};
+constexpr RECT cancelButton{870, 397, 1056, 451};
+constexpr std::array handNames{L"Left glove", L"Right glove"};
 
 bool openDesktop(bool managed) {
-    if (FindWindowW(L"OpenCapDesktop", nullptr)) return true;
+    if (const auto window = FindWindowW(L"OpenCapDesktop", nullptr)) {
+        if (!managed) {
+            if (IsIconic(window)) ShowWindowAsync(window, SW_RESTORE);
+            SetForegroundWindow(window);
+        }
+        return true;
+    }
     const auto directory = executableFolder();
     const auto executable = directory / L"OpenCap.exe";
     auto command = L"\"" + executable.wstring() + L"\"";
@@ -32,15 +52,13 @@ bool openDesktop(bool managed) {
     STARTUPINFOW start{};
     start.cb = sizeof(start);
     start.dwFlags = STARTF_USESHOWWINDOW;
-    start.wShowWindow = SW_SHOWNOACTIVATE;
+    start.wShowWindow = managed ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
     PROCESS_INFORMATION process{};
-    if (CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                       directory.c_str(), &start, &process)) {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-        return true;
-    }
-    return false;
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        directory.c_str(), &start, &process)) return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
 }
 
 class Runtime {
@@ -53,6 +71,9 @@ public:
     }
     ~Runtime() { vr::VR_Shutdown(); }
 };
+
+enum class Font { title, heading, body, label };
+enum class ButtonStyle { primary, secondary };
 
 class Canvas {
 public:
@@ -69,50 +90,54 @@ public:
         image_ = CreateDIBSection(dc_, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
         pixels_ = static_cast<std::uint32_t*>(pixels);
         if (dc_ && image_) previous_ = SelectObject(dc_, image_);
-        title_ = font(39, FW_SEMIBOLD);
-        body_ = font(25, FW_NORMAL);
-        if (!pixels_ || !title_ || !body_) {
+        fonts_ = {font(47, FW_SEMIBOLD), font(34, FW_SEMIBOLD), font(28, FW_NORMAL), font(23, FW_SEMIBOLD)};
+        if (!dc_ || !previous_ || !pixels_ || std::ranges::find(fonts_, nullptr) != fonts_.end()) {
             cleanup();
             throw std::runtime_error("Could not allocate the dashboard surface.");
         }
         SetBkMode(dc_, TRANSPARENT);
     }
-
     ~Canvas() { cleanup(); }
 
     void rect(RECT area, COLORREF color) {
-        auto fill = CreateSolidBrush(color);
-        FillRect(dc_, &area, fill);
-        DeleteObject(fill);
+        SetDCBrushColor(dc_, color);
+        FillRect(dc_, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     }
 
-    void text(int x, int y, std::wstring_view value, COLORREF color = foreground, bool title = false) {
-        const auto previous = SelectObject(dc_, title ? title_ : body_);
+    void rounded(RECT area, int radius, COLORREF color) {
+        const auto lastPen = SelectObject(dc_, GetStockObject(NULL_PEN));
+        const auto lastBrush = SelectObject(dc_, GetStockObject(DC_BRUSH));
+        SetDCBrushColor(dc_, color);
+        RoundRect(dc_, area.left, area.top, area.right, area.bottom, radius, radius);
+        SelectObject(dc_, lastBrush);
+        SelectObject(dc_, lastPen);
+    }
+
+    void text(RECT area, std::wstring_view value, Font style, COLORREF color = foreground, UINT align = DT_LEFT) {
+        const auto previous = SelectObject(dc_, fonts_[static_cast<std::size_t>(style)]);
         SetTextColor(dc_, color);
-        TextOutW(dc_, x, y, value.data(), static_cast<int>(value.size()));
-        SelectObject(dc_, previous);
-    }
-
-    void status(RECT area, std::wstring_view value) {
-        const auto previous = SelectObject(dc_, body_);
-        SetTextColor(dc_, muted);
         DrawTextW(dc_, value.data(), static_cast<int>(value.size()), &area,
-                  DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS);
+                  align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SelectObject(dc_, previous);
     }
 
-    void label(RECT area, std::wstring_view value, bool enabled, bool selected = false) {
-        rect(area, selected ? RGB(11, 94, 98) : panel);
-        text(area.left + 12, area.top + 9, value, enabled ? foreground : muted);
+    void button(RECT area, std::wstring_view value, bool enabled, ButtonStyle style, POINT cursor) {
+        const bool hover = enabled && PtInRect(&area, cursor);
+        const bool primary = enabled && style == ButtonStyle::primary;
+        const auto fill = primary ? (hover ? RGB(145, 246, 223) : accent)
+            : hover ? RGB(54, 78, 96) : enabled ? border : RGB(31, 46, 61);
+        rounded(area, 16, fill);
+        InflateRect(&area, -10, 0);
+        text(area, value, Font::body, primary ? accentInk : enabled ? foreground : muted, DT_CENTER);
     }
 
-    bool upload(vr::IVROverlay& overlay, vr::VROverlayHandle_t handle) {
+    std::span<const std::uint32_t> frame() {
         GdiFlush();
         for (int i = 0; i < width * height; ++i) {
             const auto pixel = pixels_[i];
             pixels_[i] = 0xff000000u | (pixel & 0xff00u) | ((pixel & 0xffu) << 16) | ((pixel >> 16) & 0xffu);
         }
-        return overlay.SetOverlayRaw(handle, pixels_, width, height, 4) == vr::VROverlayError_None;
+        return {pixels_, width * height};
     }
 
 private:
@@ -123,50 +148,210 @@ private:
     void cleanup() {
         if (previous_) SelectObject(dc_, previous_);
         if (image_) DeleteObject(image_);
-        if (title_) DeleteObject(title_);
-        if (body_) DeleteObject(body_);
+        for (auto font : fonts_) if (font) DeleteObject(font);
         if (dc_) DeleteDC(dc_);
     }
 
     HDC dc_{};
     HBITMAP image_{};
     HGDIOBJ previous_{};
-    HFONT title_{}, body_{};
+    std::array<HFONT, 4> fonts_{};
     std::uint32_t* pixels_{};
 };
 
-constexpr RECT leftButton{36, 100, 268, 151};
-constexpr RECT rightButton{282, 100, 514, 151};
-constexpr RECT pageButton{650, 24, 862, 75};
-constexpr RECT launchDesktop{36, 245, 310, 296};
-constexpr RECT pairSelected{36, 244, 289, 295};
-constexpr RECT pairBoth{304, 244, 561, 295};
-constexpr RECT radioDown{36, 306, 155, 357};
-constexpr RECT radioUp{170, 306, 289, 357};
-constexpr RECT radioApply{304, 306, 561, 357};
-constexpr RECT centerJoystick{36, 374, 289, 425};
-constexpr RECT finishJoystick{304, 374, 561, 425};
-constexpr RECT publishHand{36, 442, 289, 493};
-constexpr RECT hapticsEnabled{304, 442, 561, 493};
-constexpr RECT nextTracker{36, 510, 289, 561};
-constexpr RECT autoTracker{304, 510, 561, 561};
-constexpr RECT calibrate{36, 257, 324, 308};
-constexpr RECT cancel{340, 257, 500, 308};
-constexpr RECT quickCalibration{516, 257, 797, 308};
-constexpr RECT joystick{36, 327, 324, 378};
-constexpr RECT vibration{340, 327, 592, 378};
-constexpr RECT alignMinus{36, 447, 168, 498};
-constexpr RECT alignPlus{179, 447, 311, 498};
-constexpr RECT alignAxis{326, 447, 539, 498};
-constexpr RECT alignMode{550, 447, 862, 498};
-constexpr RECT presetType{36, 521, 348, 572};
-constexpr RECT applyPreset{366, 521, 590, 572};
-constexpr std::array calibrationLabels{L"Calibrate hand", L"Capture fist", L"Capture fingers together", L"Capture fingers spread"};
-constexpr std::array calibrationActions{Action::startHand, Action::fist, Action::together, Action::spread};
+class OverlayTextures {
+public:
+    explicit OverlayTextures(vr::IVRSystem* system) {
+        if (!system) throw std::runtime_error("SteamVR did not provide the system interface.");
+        using Microsoft::WRL::ComPtr;
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()))))
+            throw std::runtime_error("Could not initialize DXGI for the dashboard.");
+        int32_t index = -1;
+        system->GetDXGIOutputInfo(&index);
+        ComPtr<IDXGIAdapter1> adapter;
+        if (index >= 0 && FAILED(factory->EnumAdapters1(static_cast<UINT>(index), adapter.GetAddressOf())))
+            throw std::runtime_error("Could not find SteamVR's graphics adapter.");
+        const auto type = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+        if (FAILED(D3D11CreateDevice(adapter.Get(), type, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
+                                    device_.GetAddressOf(), nullptr, context_.GetAddressOf())))
+            throw std::runtime_error("Could not create a Direct3D device for the dashboard.");
+        main_ = create(width, height);
+        thumbnail_ = create(64, 64);
+    }
+
+    void setIcon(vr::IVROverlay& overlay, vr::VROverlayHandle_t handle) {
+        std::array<std::uint32_t, 64*64> pixels{};
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const auto radiusSquared = (x - 31)*(x - 31) + (y - 31)*(y - 31);
+                pixels[y*64+x] = radiusSquared >= 210 && radiusSquared <= 480 ? 0xffcce567u : 0xff1f150du;
+            }
+        }
+        const auto result = submit(overlay, handle, *thumbnail_.Get(), pixels.data(), 64);
+        if (result != vr::VROverlayError_None) throw std::runtime_error(overlay.GetOverlayErrorNameFromEnum(result));
+    }
+
+    vr::EVROverlayError present(vr::IVROverlay& overlay, vr::VROverlayHandle_t handle, std::span<const std::uint32_t> pixels) {
+        if (std::ranges::equal(lastFrame_, pixels)) return vr::VROverlayError_None;
+        const auto result = submit(overlay, handle, *main_.Get(), pixels.data(), width);
+        if (result == vr::VROverlayError_None) lastFrame_.assign(pixels.begin(), pixels.end());
+        return result;
+    }
+
+private:
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> create(UINT w, UINT h) {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = w;
+        description.Height = h;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(device_->CreateTexture2D(&description, nullptr, texture.GetAddressOf())))
+            throw std::runtime_error("Could not create a SteamVR overlay texture.");
+        return texture;
+    }
+
+    vr::EVROverlayError submit(vr::IVROverlay& overlay, vr::VROverlayHandle_t handle, ID3D11Texture2D& resource,
+                               const std::uint32_t* pixels, UINT rowWidth) {
+        context_->UpdateSubresource(&resource, 0, nullptr, pixels, rowWidth * sizeof(*pixels), 0);
+        context_->Flush();
+        const vr::Texture_t texture{&resource, vr::TextureType_DirectX, vr::ColorSpace_Gamma};
+        return overlay.SetOverlayTexture(handle, &texture);
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Device> device_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> main_, thumbnail_;
+    std::vector<std::uint32_t> lastFrame_;
+};
+
+bool desktopAvailable(const Snapshot& snapshot, Millis time) {
+    return snapshot.heartbeat && time >= snapshot.heartbeat && time - snapshot.heartbeat <= sampleTimeout;
+}
+
+struct DashboardState {
+    const Snapshot& snapshot;
+    const TrackingSnapshot& tracking;
+    Millis time;
+    bool starting;
+    std::wstring_view notice;
+
+    bool desktop() const { return desktopAvailable(snapshot, time); }
+    bool live(std::size_t hand) const { return isLive(snapshot, static_cast<Side>(hand), time); }
+    bool guiding() const { return desktop() && snapshot.calibrationGuide.hands; }
+    bool canCalibrateBoth() const { return !starting && handCalibrationReady(snapshot, time); }
+};
+
+enum class DashboardAction { none, desktop, calibrate, cancel };
+
+DashboardAction actionAt(const DashboardState& state, POINT point) {
+    if (PtInRect(&desktopButton, point)) return DashboardAction::desktop;
+    if (state.guiding() && PtInRect(&cancelButton, point)) return DashboardAction::cancel;
+    if (state.canCalibrateBoth() && PtInRect(&bothButton, point)) return DashboardAction::calibrate;
+    return DashboardAction::none;
+}
+
+void drawGlove(Canvas& canvas, const DashboardState& state, std::size_t index) {
+    const auto card = gloveCards[index];
+    const auto x = card.left + 24;
+    const auto right = card.right - 24;
+    const auto& hand = state.snapshot.hands[index];
+    const auto& settings = state.snapshot.settings[index];
+    const bool live = state.live(index);
+    const std::wstring_view linkLabel = live ? L"Connected" : state.desktop() && hand.receiver ? L"Glove offline" : L"No receiver";
+    const auto linkColor = live ? accent : muted;
+    canvas.rounded(card, 24, surface);
+    canvas.text({x, 147, x + 250, 194}, handNames[index], Font::heading);
+    canvas.rounded({right - 152, 153, right, 190}, 30, live ? RGB(19, 66, 62) : border);
+    canvas.text({right - 150, 153, right - 2, 190}, linkLabel, Font::label, linkColor, DT_CENTER);
+    canvas.rect({x, 202, right, 204}, border);
+
+    const auto middle = x + 228;
+    const auto battery = live && hand.battery >= 0 ? std::format(L"{:.0f}%", hand.battery * 100) : L"—";
+    const auto signal = live && hand.signal < 0 ? radioSignalLabel(hand, true) : L"—";
+    canvas.text({x, 216, middle, 244}, L"Battery", Font::label, muted);
+    canvas.text({x, 247, middle, 286}, battery, Font::heading);
+    canvas.text({middle + 16, 216, right, 244}, L"Radio signal", Font::label, muted);
+    canvas.text({middle + 16, 247, right, 286}, signal, Font::body);
+
+    const auto tracked = live && settings.enabled && trackingCurrent(state.tracking, state.time)
+        && state.tracking.selected[index] != noTracker;
+    const auto tracker = tracked ? L"Tracker locked" : live && !settings.enabled ? L"Tracking disabled"
+        : live && trackingCurrent(state.tracking, state.time) ? L"Waiting for tracker" : L"Tracking offline";
+    const auto calibration = state.guiding() && (state.snapshot.calibrationGuide.hands & (1u << index)) ? L"Calibrating"
+        : live && hand.calibrationStep == 4 ? L"Joystick setup active"
+        : live && hand.calibrated ? L"Calibrated" : live ? L"Calibration needed" : L"";
+    canvas.text({x, 295, middle + 8, 325}, tracker, Font::label, tracked ? accent : muted);
+    canvas.text({middle + 16, 295, right, 325}, calibration, Font::label, live && !hand.calibrated ? warning : muted);
+}
+
+void drawCalibration(Canvas& canvas, const DashboardState& state, POINT cursor) {
+    canvas.rounded(calibrationCard, 24, surface);
+    const auto& guide = state.snapshot.calibrationGuide;
+    if (!state.guiding()) {
+        canvas.text({64, 399, 766, 445}, L"Hand calibration", Font::heading);
+        auto message = state.notice;
+        if (message.empty()) {
+            if (state.starting) message = L"Starting calibration…";
+            else if (!state.desktop()) message = L"Open the desktop app to connect your gloves.";
+            else if (guide.message[0]) message = guide.message.data();
+            else if (!state.live(0) || !state.live(1)) message = L"Connect both gloves to start calibration.";
+            else if (!state.canCalibrateBoth()) message = L"Finish joystick calibration in the desktop app first.";
+            else message = L"Fist  ·  Fingers together  ·  Fingers spread";
+        }
+        const auto color = !state.notice.empty() || (state.desktop() && guide.result == CalibrationResult::failed && !state.starting)
+            ? warning : state.desktop() && guide.result == CalibrationResult::saved && !state.starting ? accent : muted;
+        canvas.text({64, 485, 1056, 545}, message, Font::body, color);
+        canvas.button(bothButton, L"Calibrate gloves", state.canCalibrateBoth(), ButtonStyle::primary, cursor);
+        return;
+    }
+
+    canvas.text({64, 397, 850, 451}, L"Calibrating both gloves", Font::heading);
+    canvas.button(cancelButton, L"Cancel", true, ButtonStyle::secondary, cursor);
+
+    const auto remaining = guide.captureAt > state.time ? (std::min)(guide.captureAt - state.time, calibrationCountdown) : 0;
+    std::wstring prompt;
+    if (remaining) prompt = std::format(L"{} s  ·  {}", (remaining + 999) / 1000, calibrationPose(guide.phase));
+    else if (guide.phase > 3) prompt = L"Saving calibration…";
+    else if (guide.phase == 1 && !guide.captureAt) prompt = L"Getting ready…";
+    else prompt = L"Recording pose…";
+    canvas.text({64, 455, 1056, 495}, prompt, Font::body, accent);
+
+    constexpr std::array stepLabels{L"Fist", L"Fingers together", L"Fingers spread"};
+    for (unsigned step = 0; step < stepLabels.size(); ++step) {
+        const LONG left = 64 + 334L * step;
+        const auto phase = step + 1;
+        const bool current = phase == guide.phase;
+        const bool captured = phase < guide.phase;
+        const RECT track{left, 510, left + 324, 518};
+        canvas.rounded(track, 8, border);
+        auto fill = track;
+        if (current && guide.captureAt) fill.right -= static_cast<LONG>(324 * remaining / calibrationCountdown);
+        if (captured || (current && guide.captureAt && fill.right > fill.left)) canvas.rounded(fill, 8, accent);
+        canvas.text({left, 526, track.right, 555}, stepLabels[step], Font::label, current || captured ? accent : muted);
+    }
+    if (!state.notice.empty())
+        canvas.text({570, 397, 850, 451}, state.notice, Font::label, warning, DT_RIGHT);
+}
+
+void drawDashboard(Canvas& canvas, const DashboardState& state, POINT cursor) {
+    canvas.rect({0, 0, width, height}, background);
+    canvas.rounded({40, 37, 98, 95}, 18, accent);
+    canvas.text({40, 37, 98, 95}, L"O", Font::heading, accentInk, DT_CENTER);
+    canvas.text({115, 30, 755, 100}, L"OpenCap", Font::title);
+    canvas.button(desktopButton, L"Open desktop", true, ButtonStyle::secondary, cursor);
+    for (std::size_t index = 0; index < handCount; ++index) drawGlove(canvas, state, index);
+    drawCalibration(canvas, state, cursor);
+}
 
 class Dashboard {
 public:
-    Dashboard() : runtime_(vr::VRApplication_Overlay), overlay_(vr::VROverlay()) {
+    Dashboard() : overlay_(vr::VROverlay()), textures_(vr::VRSystem()) {
         if (!overlay_) throw std::runtime_error("SteamVR did not provide the overlay interface.");
         const auto error = overlay_->CreateDashboardOverlay(key, "OpenCap", &main_, &thumbnail_);
         if (error != vr::VROverlayError_None)
@@ -175,14 +360,6 @@ public:
         overlay_->SetOverlayMouseScale(main_, &mouse);
         overlay_->SetOverlayInputMethod(main_, vr::VROverlayInputMethod_Mouse);
         overlay_->SetOverlayWidthInMeters(main_, 1.45f);
-        std::array<std::uint32_t, 64*64> icon{};
-        for (int y = 0; y < 64; ++y) {
-            for (int x = 0; x < 64; ++x) {
-                const auto r = (x - 31)*(x - 31) + (y - 31)*(y - 31);
-                icon[y*64+x] = r > 285 && r < 510 ? 0xffc9e060u : 0xff281b11u;
-            }
-        }
-        overlay_->SetOverlayRaw(thumbnail_, icon.data(), 64, 64, 4);
     }
 
     ~Dashboard() {
@@ -190,201 +367,113 @@ public:
         if (main_) overlay_->DestroyOverlay(main_);
     }
 
-    int run() {
-        if (!paint()) throw std::runtime_error("SteamVR rejected the dashboard texture.");
-        if (loadSettings(configFolder(false)).steamLifecycle) openDesktop(true);
+    int run(bool show) {
+        textures_.setIcon(*overlay_, thumbnail_);
+        if (const auto result = paint(now()); result != vr::VROverlayError_None)
+            throw std::runtime_error(std::string("Could not submit the dashboard texture: ") + overlay_->GetOverlayErrorNameFromEnum(result));
+        if (show) overlay_->ShowDashboard(key);
+        const auto folder = configFolder(false);
+        const auto settings = loadSettings(folder);
+        launchUpdater(true, settings.includePrereleases);
+        if (steamLifecycleEnabled(folder, settings)) openDesktop(true);
         auto lastPaint = now();
         while (true) {
-            if (const auto update = bus_.read(1)) snapshot_ = *update;
-            if (const auto update = bus_.readTracking()) tracking_ = *update;
+            if (const auto update = bus_.read(1)) {
+                if (startingUntil_ && (update->calibrationGuide.hands ||
+                    update->calibrationGuide.result != snapshot_.calibrationGuide.result ||
+                    update->calibrationGuide.message != snapshot_.calibrationGuide.message)) startingUntil_ = 0;
+                snapshot_ = *update;
+            }
+            const auto time = now();
+            if (startingUntil_ && time >= startingUntil_) {
+                startingUntil_ = 0;
+                notice_ = L"Calibration didn’t start. Check the glove connection and try again.";
+            }
+
             vr::VREvent_t event{};
             while (overlay_->PollNextOverlayEvent(main_, &event, sizeof(event))) {
                 if (event.eventType == vr::VREvent_Quit) return 0;
-                if (event.eventType == vr::VREvent_MouseButtonDown && event.data.mouse.button == vr::VRMouseButton_Left) {
-                    click({static_cast<LONG>(event.data.mouse.x), height - static_cast<LONG>(event.data.mouse.y)});
+                if (event.eventType == vr::VREvent_MouseMove) {
+                    const auto point = pointer(event);
+                    const auto current = state(time);
+                    if (actionAt(current, point) != actionAt(current, cursor_)) lastPaint = 0;
+                    cursor_ = point;
+                } else if (event.eventType == vr::VREvent_FocusLeave || event.eventType == vr::VREvent_OverlayHidden) {
+                    cursor_ = {-1, -1};
+                    lastPaint = 0;
+                } else if (event.eventType == vr::VREvent_MouseButtonDown && event.data.mouse.button == vr::VRMouseButton_Left) {
+                    cursor_ = pointer(event);
+                    click(cursor_, time);
                     lastPaint = 0;
                 }
             }
-            auto system = vr::VRSystem();
-            while (system && system->PollNextEvent(&event, sizeof(event))) {
-                if (event.eventType == vr::VREvent_Quit) {
-                    system->AcknowledgeQuit_Exiting();
-                    return 0;
+            if (auto* system = vr::VRSystem()) {
+                while (system->PollNextEvent(&event, sizeof(event))) {
+                    if (event.eventType == vr::VREvent_Quit) {
+                        system->AcknowledgeQuit_Exiting();
+                        return 0;
+                    }
                 }
             }
-            const auto time = now();
-            if (time - lastPaint >= 100 && overlay_->IsOverlayVisible(main_)) {
-                paint();
+            if (overlay_->IsOverlayVisible(main_) && (!lastPaint || time - lastPaint >= 100)) {
+                if (const auto update = bus_.readTracking()) tracking_ = *update;
+                const auto result = paint(time);
+                if (result != lastTextureError_ && result != vr::VROverlayError_None) {
+                    const auto message = std::string("OpenCap dashboard texture: ") + overlay_->GetOverlayErrorNameFromEnum(result) + '\n';
+                    OutputDebugStringA(message.c_str());
+                }
+                lastTextureError_ = result;
                 lastPaint = time;
             }
-            Sleep(15);
+            Sleep(12);
         }
     }
 
 private:
-    void send(Action action, int value = 0, float duration = 0, float amplitude = 0) {
-        problem_ = bus_.send({static_cast<Side>(side_), action, value, duration, amplitude})
-            ? L"" : L"The desktop command queue is busy.";
+    static POINT pointer(const vr::VREvent_t& event) {
+        return {static_cast<LONG>(event.data.mouse.x), height - 1 - static_cast<LONG>(event.data.mouse.y)};
     }
 
-    bool desktopAvailable(Millis time) const {
-        return snapshot_.heartbeat && time >= snapshot_.heartbeat && time - snapshot_.heartbeat < sampleTimeout;
+    DashboardState state(Millis time) const {
+        return {snapshot_, tracking_, time, startingUntil_ != 0, notice_};
     }
 
-    int proposedChannel() const {
-        const auto current = snapshot_.hands[side_].channel;
-        return channels_[side_].value_or(current >= 0 && current <= 100 ? current : 20);
-    }
-
-    bool duplicateChannel() const {
-        const auto& other = snapshot_.hands[1 - side_];
-        return other.receiver && proposedChannel() == other.channel;
-    }
-
-    void clickSetup(POINT point, Millis time) {
-        const auto& hand = snapshot_.hands[side_];
-        const auto live = isLive(snapshot_, static_cast<Side>(side_), time);
-        const auto stage = hand.calibrationStep;
-        if (hand.receiver && PtInRect(&pairSelected, point)) send(hand.pairing ? Action::pairStop : Action::pairStart);
-        else if (hand.receiver && PtInRect(&pairBoth, point))
-            send(hand.pairing || snapshot_.hands[1 - side_].pairing ? Action::pairBothStop : Action::pairBoth);
-        else if (hand.receiver && PtInRect(&radioDown, point)) channels_[side_] = std::max(0, proposedChannel() - 1);
-        else if (hand.receiver && PtInRect(&radioUp, point)) channels_[side_] = std::min(100, proposedChannel() + 1);
-        else if (hand.receiver && !duplicateChannel() && PtInRect(&radioApply, point))
-            send(Action::channel, proposedChannel());
-        else if (live && stage == 0 && PtInRect(&centerJoystick, point)) send(Action::joystickCenter);
-        else if (live && stage == 4 && PtInRect(&finishJoystick, point)) send(Action::joystickFinish);
-        else if (PtInRect(&publishHand, point)) send(Action::togglePublishing);
-        else if (PtInRect(&hapticsEnabled, point)) send(Action::toggleHaptics);
-        else if (trackingCurrent(tracking_, time) && tracking_.count && PtInRect(&nextTracker, point))
-            send(Action::cycleTracker);
-        else if (PtInRect(&autoTracker, point)) send(Action::autoTracker);
-    }
-
-    void click(POINT point) {
-        problem_ = L"";
-        if (PtInRect(&leftButton, point)) { side_ = 0; return; }
-        if (PtInRect(&rightButton, point)) { side_ = 1; return; }
-        if (PtInRect(&pageButton, point)) { setup_ = !setup_; return; }
-        const auto time = now();
-        if (!desktopAvailable(time)) {
-            if (PtInRect(&launchDesktop, point) && !openDesktop(false)) problem_ = L"Could not open the OpenCap desktop.";
-            return;
+    void click(POINT point, Millis time) {
+        switch (actionAt(state(time), point)) {
+        case DashboardAction::desktop:
+            notice_ = openDesktop(false) ? L"" : L"Could not open the OpenCap desktop.";
+            break;
+        case DashboardAction::cancel:
+            notice_ = bus_.send({Side::left, Action::cancelHand}) ? L"" : L"Try canceling again.";
+            break;
+        case DashboardAction::calibrate: startCalibration(time); break;
+        case DashboardAction::none: break;
         }
-        if (setup_) { clickSetup(point, time); return; }
-        if (!isLive(snapshot_, static_cast<Side>(side_), time)) return;
-        const auto& hand = snapshot_.hands[side_];
-        if (PtInRect(&calibrate, point) && hand.calibrationStep < calibrationActions.size())
-            send(calibrationActions[hand.calibrationStep]);
-        else if (PtInRect(&cancel, point) && hand.calibrationStep >= 1 && hand.calibrationStep <= 3)
-            send(Action::cancelHand);
-        else if (PtInRect(&quickCalibration, point) && hand.calibrationStep == 0) send(Action::guidedCalibration);
-        else if (PtInRect(&joystick, point)) send(Action::toggleStick);
-        else if (PtInRect(&vibration, point)) send(Action::haptic, 0, .12f, .8f);
-        else if (PtInRect(&alignAxis, point)) axis_ = (axis_ + 1) % 3;
-        else if (PtInRect(&alignMode, point)) rotation_ = !rotation_;
-        else if (PtInRect(&alignMinus, point)) send(Action::adjustPose, axis_ + (rotation_ ? 3 : 0), 0, -1);
-        else if (PtInRect(&alignPlus, point)) send(Action::adjustPose, axis_ + (rotation_ ? 3 : 0), 0, 1);
-        else if (PtInRect(&presetType, point)) preset_ = (preset_ + 1) % trackingPresets.size();
-        else if (PtInRect(&applyPreset, point)) send(Action::applyPreset, static_cast<int>(preset_));
     }
 
-    void paintSetup(const Hand& hand, const HandSettings& settings, bool live, Millis time) {
-        const auto stage = hand.calibrationStep;
-        const auto eitherPairing = hand.pairing || snapshot_.hands[1 - side_].pairing;
-        const auto viewChannel = hand.channel >= 0 ? std::to_wstring(hand.channel) : L"—";
-        canvas_.text(36, 209, std::format(L"Receiver channel  {}   Selected  {}", viewChannel, proposedChannel()), muted);
-        canvas_.label(pairSelected, hand.pairing ? L"Stop pairing" : L"Pair selected glove", hand.receiver);
-        canvas_.label(pairBoth, eitherPairing ? L"Stop both" : L"Pair both gloves", hand.receiver);
-        canvas_.label(radioDown, L"− Channel", hand.receiver);
-        canvas_.label(radioUp, L"+ Channel", hand.receiver);
-        canvas_.label(radioApply, L"Apply channel", hand.receiver && !duplicateChannel());
-        canvas_.label(centerJoystick, L"Set joystick center", live && stage == 0);
-        canvas_.label(finishJoystick, L"Finish joystick range", live && stage == 4);
-        canvas_.label(publishHand, settings.enabled ? L"Hide SteamVR hand" : L"Show SteamVR hand", true);
-        canvas_.label(hapticsEnabled, settings.haptics ? L"Disable haptics" : L"Enable haptics", true);
-        canvas_.label(nextTracker, L"Next tracker", trackingCurrent(tracking_, time) && tracking_.count);
-        canvas_.label(autoTracker, L"Automatic tracker", true);
-        const auto serial = settings.trackerSerial[0] ? widen(settings.trackerSerial.data())
-            : settings.tracker == noTracker ? L"Automatic" : std::format(L"#{}", settings.tracker);
-        canvas_.status({579, 520, 862, 553}, serial);
-        if (duplicateChannel())
-            canvas_.status({579, 317, 862, 350}, L"Used by the other glove");
+    void startCalibration(Millis time) {
+        if (bus_.send({Side::left, Action::guidedCalibration})) {
+            notice_.clear();
+            startingUntil_ = time + commandWait;
+        } else notice_ = L"Could not start calibration. Try again.";
     }
 
-    bool paint() {
-        canvas_.rect({0, 0, width, height}, background);
-        canvas_.text(36, 24, L"OpenCap", foreground, true);
-        canvas_.label(pageButton, setup_ ? L"Calibration" : L"Device setup", true);
-        const auto time = now();
-        const auto& hand = snapshot_.hands[side_];
-        const auto& settings = snapshot_.settings[side_];
-        const auto active = isLive(snapshot_, static_cast<Side>(side_), time);
-        for (std::size_t i = 0; i < handCount; ++i) {
-            const auto connected = isLive(snapshot_, static_cast<Side>(i), time);
-            const auto label = std::format(L"{}  ·  {}", i ? L"Right" : L"Left", connected ? L"Live" : L"Offline");
-            canvas_.label(i ? rightButton : leftButton, label, true, i == side_);
-        }
-        if (trackingCurrent(tracking_, time)) {
-            const auto tracker = tracking_.selected[side_];
-            canvas_.text(543, 109, tracker == noTracker ? L"No pose source" : std::format(L"Pose source  #{}", tracker), muted);
-        }
-        if (active) {
-            const auto battery = hand.battery >= 0 ? std::format(L"{:.0f}%", 100 * hand.battery) : L"—";
-            const auto signal = hand.signal ? std::format(L"{} dBm", hand.signal) : L"—";
-            canvas_.text(36, 176, std::format(L"Battery {}   ·   {:.0f} fps   ·   {}{}", battery, hand.fps, signal,
-                snapshot_.demo ? L"   ·   Simulated" : L""), accent);
-        } else {
-            canvas_.text(36, 176, time >= snapshot_.heartbeat && snapshot_.heartbeat && time - snapshot_.heartbeat < sampleTimeout
-                ? L"The selected glove is offline." : L"Open the desktop app to connect your gloves.", muted);
-        }
-        if (!problem_.empty()) canvas_.status({36, 578, 862, 609}, problem_);
-        else if (hand.message[0]) canvas_.status({36, 578, 862, 609}, widen(hand.message.data()));
-        if (!desktopAvailable(time)) {
-            canvas_.label(launchDesktop, L"Open desktop", true);
-            return canvas_.upload(*overlay_, main_);
-        }
-        if (setup_) {
-            paintSetup(hand, settings, active, time);
-            return canvas_.upload(*overlay_, main_);
-        }
-        canvas_.text(36, 217, L"Glove controls", muted);
-        const auto stage = hand.calibrationStep;
-        canvas_.label(calibrate, stage < calibrationLabels.size() ? calibrationLabels[stage] : L"Joystick calibration",
-                      active && stage < calibrationLabels.size());
-        canvas_.label(cancel, L"Cancel", active && stage >= 1 && stage <= 3);
-        canvas_.label(quickCalibration, L"Guided calibration", active && stage == 0);
-        canvas_.label(joystick, settings.joystick ? L"Disable joystick" : L"Enable joystick", active);
-        canvas_.label(vibration, L"Test vibration", active);
-        const auto v = rotation_ ? settings.rotation : settings.position;
-        const std::array coordinates{v.x, v.y, v.z};
-        const auto name = std::wstring(1, L"XYZ"[axis_]);
-        const auto value = rotation_ ? std::format(L"{:+.0f}°", coordinates[axis_])
-            : std::format(L"{:+.0f} mm", coordinates[axis_]*1000);
-        canvas_.text(36, 405, std::format(L"Tracker alignment   {}   {}", name, value), muted);
-        canvas_.label(alignMinus, L"− Step", active);
-        canvas_.label(alignPlus, L"+ Step", active);
-        canvas_.label(alignAxis, L"Axis " + name, active);
-        canvas_.label(alignMode, rotation_ ? L"Adjust position" : L"Adjust rotation", active);
-        canvas_.label(presetType, trackingPresets[preset_].name, active);
-        canvas_.label(applyPreset, L"Apply to both hands", active);
-        return canvas_.upload(*overlay_, main_);
+    vr::EVROverlayError paint(Millis time) {
+        drawDashboard(canvas_, state(time), cursor_);
+        return textures_.present(*overlay_, main_, canvas_.frame());
     }
 
-    Runtime runtime_;
     vr::IVROverlay* overlay_{};
     vr::VROverlayHandle_t main_{}, thumbnail_{};
+    OverlayTextures textures_;
+    vr::EVROverlayError lastTextureError_{vr::VROverlayError_None};
     Canvas canvas_;
     Bus bus_;
     Snapshot snapshot_{};
     TrackingSnapshot tracking_{};
-    std::size_t side_{};
-    std::size_t preset_{};
-    int axis_{};
-    bool rotation_{};
-    bool setup_{};
-    std::array<std::optional<int>, handCount> channels_{};
-    std::wstring problem_;
+    POINT cursor_{-1, -1};
+    Millis startingUntil_{};
+    std::wstring notice_;
 };
 
 int registration(bool remove) {
@@ -407,8 +496,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR line, int) {
     try {
         if (args == L"--register") return registration(false);
         if (args == L"--unregister") return registration(true);
+        Runtime runtime(vr::VRApplication_Overlay);
+        const bool show = args == L"--show";
+        if (show) {
+            auto* overlay = vr::VROverlay();
+            vr::VROverlayHandle_t existing{};
+            if (overlay && overlay->FindOverlay(key, &existing) == vr::VROverlayError_None) {
+                overlay->ShowDashboard(key);
+                return 0;
+            }
+        }
         Dashboard dashboard;
-        return dashboard.run();
+        return dashboard.run(show);
     } catch (const std::exception& error) {
         if (args == L"--register" || args == L"--unregister") OutputDebugStringA(error.what());
         else MessageBoxA(nullptr, error.what(), "OpenCap Dashboard", MB_OK | MB_ICONERROR);

@@ -2,11 +2,41 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <numbers>
 #include <ostream>
 
 namespace opencap {
 static constexpr bool isSplayChannel(std::size_t index) { return index == 4 || index == 7 || index == 10; }
+
+FingerSplay calibratedSplay(const CalibrationSamples& calibration, const RawGloveSample& sample) {
+    constexpr std::array channels{4, 7, 10};
+    FingerSplay result{{}, true};
+    for (std::size_t gap = 0; gap < channels.size(); ++gap) {
+        const auto channel = channels[gap];
+        const int together = calibration[1][channel];
+        const int span = calibration[2][channel] - together;
+        if (std::abs(span) <= 25) continue;
+        result.gaps[gap] = std::clamp(static_cast<float>(sample[channel] - together) / span, 0.0f, 1.0f);
+    }
+    return result;
+}
+
+CalibrationGrade calibrationGrade(std::size_t channel, std::uint16_t movement) {
+    // Minimum movement for Average, Good, and Excellent in the UDCAP 0.1.8.7 hand viewer.
+    constexpr std::array<std::array<std::uint16_t, 3>, 12> limits{{
+        {420, 700, 1050}, {210, 350, 700}, {130, 220, 350}, {200, 350, 700},
+        {130, 220, 350}, {150, 250, 500}, {230, 380, 800}, {130, 220, 350},
+        {150, 250, 500}, {200, 350, 700}, {130, 220, 350}, {300, 500, 950}
+    }};
+    const auto& cutoffs = limits.at(channel);
+    return static_cast<CalibrationGrade>(std::ranges::upper_bound(cutoffs, movement) - cutoffs.begin());
+}
+
+const char* calibrationGradeName(CalibrationGrade grade) {
+    constexpr std::array names{"Poor", "Average", "Good", "Excellent"};
+    return names[static_cast<std::size_t>(grade)];
+}
 
 CalibrationSpans calibrationSpans(const CalibrationSamples& samples) {
     CalibrationSpans result;
@@ -15,9 +45,15 @@ CalibrationSpans calibrationSpans(const CalibrationSamples& samples) {
         const auto span = static_cast<std::uint16_t>(std::abs(
             static_cast<int>(samples[isSplayChannel(i) ? 2 : 0][i]) - samples[1][i]));
         result.counts[i] = span;
-        if (span <= calibrationMovementThreshold) ++result.lowChannels;
+        if (calibrationGrade(i, span) == CalibrationGrade::poor) ++result.lowChannels;
     }
     return result;
+}
+
+std::wstring radioSignalLabel(const Hand& hand, bool live) {
+    if (!live || hand.signal >= 0) return L"No signal reading";
+    const auto quality = hand.signal > -45 ? L"Strong" : hand.signal > -60 ? L"Fair" : L"Weak";
+    return std::format(L"{} ({} dBm)", quality, hand.signal);
 }
 
 void writeCalibrationReport(std::ostream& output, Side side, const CalibrationSamples& samples) {
@@ -28,7 +64,7 @@ void writeCalibrationReport(std::ostream& output, Side side, const CalibrationSa
         const auto span = spans.counts[i];
         output << hand << ',' << (isSplayChannel(i) ? "splay" : "flexion") << ',' << i + 4 << ','
                << samples[0][i] << ',' << samples[1][i] << ',' << samples[2][i] << ',' << span << ','
-               << (span <= calibrationMovementThreshold ? "low movement" : "measured") << '\n';
+               << calibrationGradeName(calibrationGrade(i, span)) << '\n';
     }
     for (std::size_t i = spans.counts.size(); i < samples.front().size(); ++i)
         output << hand << ",auxiliary," << i - spans.counts.size() + 1 << ',' << samples[0][i] << ','
@@ -52,6 +88,28 @@ bool validButtonRange(ButtonRange range) {
     return range.touch >= 0 && range.click <= 1 && range.touch <= range.click;
 }
 
+const wchar_t* calibrationPose(unsigned phase) {
+    switch (phase) {
+    case 1: return L"Make a fist";
+    case 2: return L"Straighten fingers and bring them together";
+    case 3: return L"Keep your fingers straight and spread them apart";
+    default: return L"";
+    }
+}
+
+std::wstring calibrationPrompt(const CalibrationGuide& guide, Millis time) {
+    if (!guide.hands) return {};
+    if (!guide.captureAt) return guide.phase == 1 ? L"Starting hand calibration…" : L"Recording pose…";
+    const auto remaining = time < guide.captureAt ? (guide.captureAt - time + 999) / 1000 : 0;
+    if (!remaining) return L"Recording pose…";
+    return std::wstring(calibrationPose(guide.phase)) + L"  •  " + std::to_wstring(remaining) + L" s";
+}
+
+bool validHandCurve(std::size_t channel, const HandCurve& curve) {
+    return channel < HandCurves{}.size() && curve.min >= -180 && curve.max <= 180 && curve.min <= curve.max &&
+        curve.balance >= 0 && curve.balance <= 1 && std::abs(curve.offset) <= 45 &&
+        (channel != 11 || (curve.min == 0 && curve.max == 0 && curve.balance == .5));
+}
 bool StickHold::update(bool held, Millis time) {
     if (!held) { pressed_ = consumed_ = false; return false; }
     if (!pressed_ || time < started_) {
@@ -88,6 +146,11 @@ bool isLive(const Snapshot& snapshot, Side side, Millis now) {
     const auto& hand = snapshot.hands.at(static_cast<std::size_t>(side));
     return hand.linked && hand.lastFrame && now >= hand.lastFrame && now >= snapshot.heartbeat
         && now - hand.lastFrame <= sampleTimeout && now - snapshot.heartbeat <= sampleTimeout;
+}
+
+bool handCalibrationReady(const Snapshot& snapshot, Millis time) {
+    return !snapshot.calibrationGuide.hands && isLive(snapshot, Side::left, time) && isLive(snapshot, Side::right, time)
+        && std::ranges::all_of(snapshot.hands, [](const Hand& hand) { return hand.calibrationStep == 0; });
 }
 
 Quaternion normalize(Quaternion q) {
@@ -128,6 +191,7 @@ Hand demoHand(Side side, Millis now) {
     hand.receiver = true;
     hand.linked = true;
     hand.calibrated = true;
+    hand.controllerRevision = side == Side::left ? 1 : 2;
     hand.battery = .8f;
     hand.fps = 120;
     hand.signal = -46;

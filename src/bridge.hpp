@@ -4,13 +4,14 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
 namespace opencap {
 Millis now();
 std::wstring widen(std::string_view value);
-inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v8";
+inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v13";
 
 class Bus {
 public:
@@ -26,6 +27,7 @@ public:
     bool publishTracking(const TrackingSnapshot& snapshot);
     std::optional<TrackingSnapshot> readTracking() const;
     bool send(const Command& command);
+    bool send(std::span<const Command> commands);
     std::optional<Command> next();
 
 private:

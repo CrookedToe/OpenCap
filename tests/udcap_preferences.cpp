@@ -32,7 +32,7 @@ struct Fixture {
     ~Fixture() {
         std::error_code error;
         for (const auto& path : {sources.desktopDefaults, sources.desktopSettings, sources.steamvrDefaults,
-                                 sources.steamvrRegistry, vr, root / L"settings.txt", root})
+                                 sources.steamvrRegistry, vr, root / L"settings.txt", root / L"steamvr-switch.json", root})
             std::filesystem::remove(path, error);
     }
 };
@@ -49,6 +49,9 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         Fixture f;
+        const auto withoutVendor = readUdcapPreferences(f.sources);
+        require(!withoutVendor.found && withoutVendor.receiver[0].empty() && withoutVendor.receiver[1].empty(),
+                "OpenCap starts with its own defaults when UDCAP configuration files are absent");
         Preferences preferences;
         preferences.quickStick = true;
         preferences.steamLifecycle = true;
@@ -59,8 +62,14 @@ int wmain(int argc, wchar_t** argv) {
         saved >> format;
         saved.close();
         const auto restored = loadSettings(f.root);
-        require(format == 3 && restored.quickStick && restored.steamLifecycle && restored.hands[0].tracker == 8,
+        require(format == 3 && restored.quickStick && restored.steamLifecycle == true && restored.hands[0].tracker == 8,
                 "New preferences retain a file version the previous application can read");
+        require(!steamLifecycleEnabled(f.root, {}), "Portable desktop keeps autostart off by default");
+        put(f.root / L"steamvr-switch.json", "{}");
+        require(steamLifecycleEnabled(f.root, {}), "Setup enables desktop autostart when no choice was saved");
+        preferences.steamLifecycle = false;
+        require(saveSettings(f.root, preferences) && !steamLifecycleEnabled(f.root, loadSettings(f.root)),
+                "A saved opt-out overrides the setup default on the next SteamVR start");
         put(f.sources.desktopDefaults, R"xml(<configuration><appSettings>
           <add key="L_Rocky_X_Min" value="600"/><add key="L_Rocky_X_Center" value="1800"/>
           <add key="L_Rocky_X_Max" value="3800"/><add key="L_Vibartion_Enable" value="True"/>

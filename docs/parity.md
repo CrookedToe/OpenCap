@@ -6,14 +6,14 @@ The Windows reference installation identifies its desktop executable and assembl
 
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
-| Receiver and radio | Community core integration, periodic discovery, glove telemetry, pairing controls, channel selection with receiver confirmation, vibration | Physical receiver and glove tests, combined receiver behavior, radio recovery and interference measurements |
-| Calibration | Three-pose captures and flexion/splay quality saved per glove, raw CSV export, recalibration with cancel and recovery, saved joystick center and range, timed voice guidance | Compare the first-party quality grades and physical poses, including after restarts |
-| Desktop | Live hand and data viewers, digital remapping, touch and click threshold editors, five-second joystick shortcut, joint corrections, four UDCAP tracker presets and CSV sample export | Additional remapping and vibration behaviors, firmware workflows |
-| Controllers | Compact and extended joystick frames, revision-specific haptics and joystick calibration commands | Verify both controller revisions on hardware, including V2 calibration responses, remaining gestures and vibration patterns |
-| Streaming | Configurable VMC finger rotations and UDCAP VRChat OSC parameters | Verify VMC coordinates and exercise avatar output with live gloves |
+| Receiver and radio | Windows COM discovery and wake reconnect, community core probe and telemetry, pairing, desktop channel controls verified by receiver readback, radio signal in both interfaces, vibration | Confirm receiver identities and exercise both gloves, combined and wired devices, reconnect, and radio interference on accessible hardware |
+| Calibration | Automatic three-pose capture with spoken prompts and a three-second countdown per pose, UDCAP per-channel flexion/splay grades and CSV export, cancel and recovery, saved joystick center and range | Compare displayed grades and glove response on live captures and check persistence after restarts |
+| Desktop | Live hand and data viewers, controller input meters, digital remapping, touch and click threshold editors, five-second joystick shortcut, editable per-glove response curves, joint corrections, four UDCAP tracker presets, and CSV sample export | Compare live settings and response against UDCAP, including all controller inputs and toggle behavior |
+| Controllers | Compact and extended joystick frames, controller revision display, separate Controller 1.0 motor tests and Controller 2.0 intensity tests, revision-aware haptics and joystick calibration commands | Exercise both revisions on hardware, including V2 calibration responses, remaining gestures, and actuator behavior |
+| Streaming | VMC finger transforms and controller blends, neutral state on connection loss, UDCAP VRChat OSC parameters | Compare motion and input in a VMC or VRChat client using live gloves |
 | SteamVR driver | OpenVR controller input, independent joints, complete 31-bone transforms, tracker selection by serial, pose-source telemetry, controller priority and haptic routing | Verify both hands in SteamVR and in games, including alignment and loss of tracking |
-| SteamVR dashboard | Device status, guided and manual hand calibration, pairing, channel selection, joystick calibration and toggle, haptics, tracker selection, alignment, presets and optional SteamVR-managed desktop startup | In-headset controls, desktop startup and shutdown on a running SteamVR installation, and the full first-party dashboard inventory |
-| Firmware and distribution | Firmware version display, MCUboot file and payload-hash inspection, per-user install, upgrade and rollback, reversible SteamVR registration | Signature validation against a trusted key, firmware transfer and recovery, automatic application updates, and hardware regression checks |
+| SteamVR dashboard | At-a-glance status for both gloves, shared guided calibration and countdown, cancellation and outcome feedback, quick access to the desktop, and optional SteamVR-managed desktop startup | In-headset readability and input, and desktop startup and shutdown on a running SteamVR installation |
+| Firmware and distribution | Firmware version display, MCUboot hash and optional signature verification, native USB and wireless transfers for supported 0.1.8.7 images, USB driver setup through Windows Update, reversible per-user SteamVR setup, verified release upgrades with rollback | Combined receiver and controller firmware, recovery for a device without a verifiable identity, live USB and wireless transfers, clean Windows PnP acceptance, and upgrade from a published release |
 | Settings migration | Layer installed desktop and driver defaults, saved desktop preferences and UDCAP SteamVR settings | Compare the imported joystick range, finger response and tracker alignment on live hardware |
 
 ## Acceptance matrix
@@ -31,8 +31,21 @@ The Windows reference installation identifies its desktop executable and assembl
 | Hand viewer | Live hand and data views, camera controls, detachable window and data export | Compare live movement and exported fields |
 | Streaming | OSC and VMC configuration and output | Verify message addresses, units, coordinate systems, update rate and receiver compatibility |
 | SteamVR driver | Register, expose two hand devices, update skeleton, inputs and haptics | Run SteamVR with the replacement and compare both hands and bindings in a game |
-| SteamVR dashboard | Device status, quick controls, offset and calibration actions, startup behavior | Open and exercise every action in-headset, then restart SteamVR |
+| SteamVR dashboard | Two-glove status, quick hand calibration, desktop launch, startup behavior | Open and exercise each action in-headset, then restart SteamVR |
 | Distribution | Install/update and enable/disable the SteamVR components | Confirm a fresh Windows install, upgrade, removal, and restoration of UDCAP |
+
+## Windows verification
+
+- The receiver-enabled build passes the automated desktop, OpenVR factory, calibration, controller packet, settings, skeleton, firmware image, and VMC mapping checks. An injected send function also verified the VMC packet encoding and the reset on disconnect. UDP delivery to a real client still needs a test outside the isolated environment.
+- OpenCap installation, reinstall, rollback after a locked SteamVR configuration file, and UDCAP restoration passed with isolated SteamVR profiles. Valve's registration utility saw the expected driver after each switch. Dashboard autostart was verified in configuration and still needs an in-headset check.
+- Simulated upgrade and rollback passed with Windows PowerShell 5.1 and PowerShell 7. The three firmware images installed with UDCAP 0.1.8.7 passed complete-file and MCUboot hash checks. USB and wireless transfers were exercised with simulated bootloader acknowledgments, including fragmented, stale, and rejected replies.
+- The native OpenCap desktop recognized both receivers and streamed from both Controller 2.0 gloves. The wearer confirmed the high vibration pulse on each glove. Radio changes, Controller 1.0 hardware, and in-game haptics remain open.
+- The wearer confirmed the Controller 2.0 System button fix in SteamVR after reporting that the other controller buttons worked. A simulated press and release also verifies that the System button works while A is held.
+- The desktop pages and shared two-glove calibration were checked with simulated gloves. In-headset verification is pending for dashboard texture stability and the back-of-hand tracker pose.
+
+## Calibration roadmap
+
+Replace the timed pose workflow with live calibration after the current capture and persistence behavior is verified on both hands.
 
 ## Evidence
 

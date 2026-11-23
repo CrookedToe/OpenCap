@@ -14,42 +14,39 @@
 #include <shellapi.h>
 #include <sapi.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <future>
 #include <iterator>
 #include <locale>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 namespace {
 using namespace opencap;
 
 constexpr UINT_PTR tickTimer = 1;
+constexpr Millis captureTimeout = 5000;
 enum Control {
     leftHand = 100, rightHand, nextPose, cancelPose, centerStick, finishStick, pair,
     stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
     trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
     applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
-    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup, saveCalibration
+    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup, saveCalibration,
+    checkUpdates, includeBetas, vibrateSecond, firmwareUpdates, handResponse,
+    glovesPage, devicesPage, trackingPage, streamingPage, settingsPage
 };
 
-struct CalibrationControl {
-    const wchar_t* label;
-    Action action;
-};
-constexpr std::array calibration{
-    CalibrationControl{L"Start hand calibration", Action::startHand},
-    CalibrationControl{L"Capture fist", Action::fist},
-    CalibrationControl{L"Capture fingers together", Action::together},
-    CalibrationControl{L"Capture fingers spread", Action::spread},
-    CalibrationControl{L"Finish joystick range first", Action::startHand}
-};
-constexpr std::array guidance{L"Make a fist.", L"Straighten your fingers and bring them together.",
-                              L"Spread your fingers apart."};
+constexpr std::array pageNames{L"Gloves", L"Devices", L"Tracking", L"Streaming", L"Settings"};
 
+constexpr std::array captureActions{Action::fist, Action::together, Action::spread};
 class Voice {
 public:
     explicit Voice(bool enabled) {
@@ -105,6 +102,7 @@ public:
         if (font_) DeleteObject(font_);
         if (title_) DeleteObject(title_);
         if (brush_) DeleteObject(brush_);
+        if (section_) DeleteObject(section_);
     }
 
     int run(HINSTANCE instance, int view) {
@@ -123,7 +121,7 @@ public:
         ShowWindow(window_, view);
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-            if (msg.message == WM_KEYDOWN && msg.wParam == VK_F1) startQuick((1u << handCount) - 1);
+            if (msg.message == WM_KEYDOWN && msg.wParam == VK_F1) startQuick();
             else if (!IsDialogMessageW(window_, &msg)) {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -151,17 +149,40 @@ private:
             else if (HIWORD(wParam) == BN_CLICKED) click(LOWORD(wParam));
             return 0;
         case WM_TIMER: tick(); return 0;
-        case WM_HOTKEY: if (wParam == 1) startQuick((1u << handCount) - 1); return 0;
+        case WM_POWERBROADCAST:
+#ifdef OPENCAP_RECEIVER
+            if (wParam == PBT_APMRESUMEAUTOMATIC && receiver_) {
+                if (snapshot_.calibrationGuide.hands) stopQuick(L"Calibration stopped while Windows was asleep.", CalibrationResult::failed);
+                receiver_.reset();
+                snapshot_.hands = {};
+                resumeReceivers();
+            }
+#endif
+            return TRUE;
+        case WM_HOTKEY: if (wParam == 1) startQuick(); return 0;
         case WM_ERASEBKGND: return 1;
-        case WM_PAINT: paintDesktop(window_, brush_, font_, title_, snapshot_, tracking_, side_, status_); return 0;
+        case WM_DRAWITEM:
+            if (wParam >= glovesPage && wParam <= settingsPage) {
+                paintDesktopTab(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam),
+                                wParam - glovesPage == static_cast<unsigned>(page_));
+                return TRUE;
+            }
+            break;
+        case WM_CLOSE:
+#ifdef OPENCAP_RECEIVER
+            if (nativeUpdate_.valid()) return 0;
+#endif
+            return DefWindowProcW(window_, message, wParam, lParam);
+        case WM_PAINT: paintDesktop(window_, brush_, font_, title_, section_, snapshot_, tracking_, side_, page_, status_); return 0;
         case WM_DESTROY:
             UnregisterHotKey(window_, 1);
             KillTimer(window_, tickTimer);
             stream_.configure({});
             PostQuitMessage(0);
             return 0;
-        default: return DefWindowProcW(window_, message, wParam, lParam);
+        default: break;
         }
+        return DefWindowProcW(window_, message, wParam, lParam);
     }
 
     HWND item(const wchar_t* type, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
@@ -169,6 +190,7 @@ private:
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | (style & ~WS_BORDER), x, y, w, h, window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        if (control && creatingPage_) pageControls_[static_cast<std::size_t>(*creatingPage_)].push_back(control);
         return control;
     }
 
@@ -183,65 +205,100 @@ private:
     void create() {
         font_ = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         title_ = CreateFontW(-30, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        section_ = CreateFontW(-21, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         brush_ = CreateSolidBrush(desktopBackground);
-        button(leftHand, L"Left glove", 30, 161, 130, BS_AUTORADIOBUTTON | WS_GROUP);
-        button(rightHand, L"Right glove", 170, 161, 130, BS_AUTORADIOBUTTON);
-        button(quickJoystick, L"Hold stick to toggle joystick", 307, 161, 248, WS_GROUP | BS_AUTOCHECKBOX);
+        button(leftHand, L"Left glove", 50, 122, 120, BS_AUTORADIOBUTTON | WS_GROUP);
+        button(rightHand, L"Right glove", 480, 122, 120, BS_AUTORADIOBUTTON);
+        button(dashboard, L"Open in SteamVR", 713, 26, 177, WS_GROUP | BS_PUSHBUTTON);
+        for (std::size_t i = 0; i < pageNames.size(); ++i)
+            item(L"BUTTON", pageNames[i], BS_OWNERDRAW, 30 + 173 * static_cast<int>(i), 174, 168, 38, glovesPage + static_cast<int>(i));
+
+        creatingPage_ = DesktopPage::gloves;
+        button(handView, L"Open hand viewer", 50, 480, 160);
+        button(saveCsv, L"Export hand sample", 219, 480, 170);
+        button(nextPose, L"Calibrate both gloves", 472, 298, 245, WS_DISABLED);
+        button(cancelPose, L"Cancel", 726, 298, 143);
+        button(centerStick, L"Set joystick center", 472, 371, 194);
+        button(finishStick, L"Finish joystick range", 675, 371, 194);
+        button(inputMapping, L"Controller inputs…", 472, 462, 137);
+        button(handResponse, L"Hand response…", 617, 462, 123);
+        button(jointAdjustment, L"Joint correction…", 748, 462, 121);
+        if (!demo_) button(saveCalibration, L"Export calibration", 472, 498, 192);
+
+        creatingPage_ = DesktopPage::devices;
+        button(pair, L"Pair glove", 50, 319, 110);
+        button(stopPair, L"Stop pairing", 169, 319, 117);
+        button(pairBoth, L"Pair both", 295, 319, 113);
+        item(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 50, 427, 90, 26, channelValue);
+        button(setChannel, L"Apply channel", 151, 425, 141);
+        button(vibrate, L"Test motor 1", 472, 319, 188);
+        button(vibrateSecond, L"Test motor 2", 670, 319, 199);
+        button(useJoystick, L"Enable joystick", 472, 421, 187, BS_AUTOCHECKBOX);
+        button(useHaptics, L"Enable vibration", 670, 421, 199, BS_AUTOCHECKBOX);
+        button(quickJoystick, L"Hold stick to toggle joystick", 472, 457, 280, BS_AUTOCHECKBOX);
         CheckDlgButton(window_, quickJoystick, prefs_.quickStick ? BST_CHECKED : BST_UNCHECKED);
-        button(dashboard, L"Open in SteamVR", 707, 27, 182);
-        if (!demo_) button(importUdcap, L"Import UDCAP settings", 494, 27, 201);
-        button(nextPose, calibration[0].label, 422, 235, 228, WS_GROUP | BS_PUSHBUTTON);
-        button(cancelPose, L"Cancel", 662, 235, 103);
-        button(centerStick, L"Set joystick center", 422, 272, 228);
-        button(finishStick, L"Finish joystick range", 662, 272, 227);
-        button(pair, L"Pair glove", 422, 321, 140);
-        button(stopPair, L"Stop pairing", 572, 321, 138);
-        button(pairBoth, L"Pair both", 720, 321, 169);
-        edit(channelValue, 521, 359, 70);
-        button(setChannel, L"Set channel", 602, 357, 128);
-        button(vibrate, L"Test vibration", 741, 357, 148);
-        button(useHand, L"Publish to SteamVR", 422, 400, 172, BS_AUTOCHECKBOX);
-        button(useJoystick, L"Joystick", 600, 400, 110, BS_AUTOCHECKBOX);
-        button(useHaptics, L"Vibration", 729, 400, 133, BS_AUTOCHECKBOX);
-        button(inputMapping, L"Controller…", 755, 444, 134);
-        const auto tracker = item(L"COMBOBOX", L"", CBS_DROPDOWN | WS_VSCROLL, 422, 497, 110, 210, trackerNum);
+
+        creatingPage_ = DesktopPage::tracking;
+        const auto tracker = item(L"COMBOBOX", L"", CBS_DROPDOWN | WS_VSCROLL, 50, 322, 358, 210, trackerNum);
         SendMessageW(tracker, CB_SETDROPPEDWIDTH, 280, 0);
-        edit(posX, 538, 497, 50); edit(posY, 595, 497, 51); edit(posZ, 652, 497, 50);
-        edit(rotX, 709, 497, 52); edit(rotY, 767, 497, 53); edit(rotZ, 827, 497, 53);
-        button(applyPose, L"Apply tracker alignment", 422, 531, 228);
-        button(saveCsv, L"Export hand sample", 30, 528, 181);
-        button(handView, L"Open hand viewer", 223, 528, 170);
-        if (!demo_) button(saveCalibration, L"Export calibration", 30, 562, 181);
-        button(jointAdjustment, L"Joint correction…", 223, 205, 170);
-        button(globalHotkey, L"F1 quick calibration", 662, 531, 227, BS_AUTOCHECKBOX);
-        button(preferOpenCap, L"Prefer OpenCap in SteamVR", 662, 567, 227, BS_AUTOCHECKBOX);
-        const auto plans = item(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 422, 568, 137, 194, trackingPlan);
+        edit(posX, 472, 327, 126); edit(posY, 607, 327, 126); edit(posZ, 742, 327, 127);
+        edit(rotX, 472, 404, 126); edit(rotY, 607, 404, 126); edit(rotZ, 742, 404, 127);
+        button(applyPose, L"Apply tracker alignment", 472, 469, 218);
+        button(useHand, L"Publish to SteamVR", 50, 362, 358, BS_AUTOCHECKBOX);
+        button(preferOpenCap, L"Prefer OpenCap in SteamVR", 50, 395, 358, BS_AUTOCHECKBOX);
+        const auto plans = item(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 50, 467, 184, 194, trackingPlan);
         for (const auto& preset : trackingPresets)
             SendMessageW(plans, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.name));
         SendMessageW(plans, CB_SETCURSEL, 0, 0);
-        button(useTrackingPlan, L"Use preset", 568, 566, 88);
-        edit(udpIp, 30, 654, 174);
-        edit(vmcPort, 215, 654, 77);
-        edit(oscIp, 314, 654, 174);
-        edit(oscPort, 499, 654, 77);
-        button(applyStream, L"Apply streaming", 592, 651, 167);
-        button(inspectImage, L"Inspect firmware image…", 683, 716, 206);
+        button(useTrackingPlan, L"Apply to both hands", 244, 466, 164);
+
+        creatingPage_ = DesktopPage::streaming;
+        edit(udpIp, 50, 350, 235);
+        edit(vmcPort, 305, 350, 103);
+        edit(oscIp, 472, 350, 269);
+        edit(oscPort, 762, 350, 107);
+        button(applyStream, L"Apply streaming", 50, 457, 167);
+
+        creatingPage_ = DesktopPage::settings;
+        button(globalHotkey, L"Allow F1 calibration from other apps", 50, 319, 358, BS_AUTOCHECKBOX);
+        button(inspectImage, L"Inspect firmware image…", 472, 320, 199);
         if (!demo_) {
-            button(steamStartup, L"Start and stop with SteamVR", 30, 720, 254, BS_AUTOCHECKBOX);
-            CheckDlgButton(window_, steamStartup, prefs_.steamLifecycle ? BST_CHECKED : BST_UNCHECKED);
+            button(steamStartup, L"Start and stop with SteamVR", 50, 357, 358, BS_AUTOCHECKBOX);
+            CheckDlgButton(window_, steamStartup, steamLifecycleEnabled(folder_, prefs_) ? BST_CHECKED : BST_UNCHECKED);
+#ifdef OPENCAP_RECEIVER
+            button(firmwareUpdates, L"Firmware updates…", 680, 320, 189);
+#endif
+            button(checkUpdates, L"Check for updates", 472, 438, 184);
+            button(importUdcap, L"Import UDCAP settings", 666, 438, 203);
+            button(includeBetas, L"Include beta releases", 472, 477, 260, BS_AUTOCHECKBOX);
+            CheckDlgButton(window_, includeBetas, prefs_.includePrereleases ? BST_CHECKED : BST_UNCHECKED);
         }
+        creatingPage_.reset();
         showStream();
         if (prefs_.hotkey && !RegisterHotKey(window_, 1, MOD_NOREPEAT, VK_F1)) prefs_.hotkey = false;
         CheckDlgButton(window_, globalHotkey, prefs_.hotkey ? BST_CHECKED : BST_UNCHECKED);
-        SetDlgItemInt(window_, channelValue, 20, FALSE);
         select(0);
+        showPage(DesktopPage::gloves);
         SetTimer(window_, tickTimer, 16, nullptr);
+    }
+
+    void showPage(DesktopPage page) {
+        page_ = page;
+        for (std::size_t i = 0; i < pageControls_.size(); ++i) {
+            for (const auto control : pageControls_[i])
+                ShowWindow(control, i == static_cast<std::size_t>(page) ? SW_SHOWNA : SW_HIDE);
+            InvalidateRect(GetDlgItem(window_, glovesPage + static_cast<int>(i)), nullptr, FALSE);
+        }
+        InvalidateRect(window_, nullptr, FALSE);
     }
 
     void select(std::size_t side) {
         side_ = side;
         CheckRadioButton(window_, leftHand, rightHand, side ? rightHand : leftHand);
         const auto& h = prefs_.hands[side];
+        shownChannel_ = snapshot_.hands[side].channel;
+        if (shownChannel_ >= 0) SetDlgItemInt(window_, channelValue, shownChannel_, FALSE);
+        else SetDlgItemTextW(window_, channelValue, L"");
         CheckDlgButton(window_, useHand, h.enabled ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useJoystick, h.joystick ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useHaptics, h.haptics ? BST_CHECKED : BST_UNCHECKED);
@@ -304,7 +361,8 @@ private:
     }
 
     void importSettings() {
-        if (quickMask_ || std::ranges::any_of(snapshot_.hands, [](const auto& h) { return h.calibrationStep != 0; })) {
+        if (snapshot_.calibrationGuide.hands ||
+            std::ranges::any_of(snapshot_.hands, [](const auto& h) { return h.calibrationStep != 0; })) {
             status_ = L"Finish the current calibration before importing settings.";
             return;
         }
@@ -332,11 +390,26 @@ private:
     }
 
     void click(int id) {
+        if (id >= glovesPage && id <= settingsPage) {
+            showPage(static_cast<DesktopPage>(id - glovesPage));
+            return;
+        }
         auto& settings = prefs_.hands[side_];
         const auto& hand = snapshot_.hands[side_];
         switch (id) {
         case importUdcap: importSettings(); break;
         case inspectImage: showFirmwareImage(window_); break;
+#ifdef OPENCAP_RECEIVER
+        case firmwareUpdates: firmwareMenu(); break;
+#endif
+        case checkUpdates:
+            if (!launchUpdater(false, prefs_.includePrereleases))
+                status_ = L"Update checks are available in the packaged Windows build.";
+            break;
+        case includeBetas:
+            prefs_.includePrereleases = IsDlgButtonChecked(window_, id) == BST_CHECKED;
+            save();
+            break;
         case steamStartup:
             prefs_.steamLifecycle = IsDlgButtonChecked(window_, id) == BST_CHECKED;
             save();
@@ -347,9 +420,12 @@ private:
         case leftHand: select(0); break;
         case rightHand: select(1); break;
         case nextPose:
-            if (!quickMask_ && hand.calibrationStep < 4) send(calibration[hand.calibrationStep].action);
+            startQuick();
             break;
-        case cancelPose: if (quickMask_) stopQuick(); else send(Action::cancelHand); break;
+        case cancelPose:
+            if (snapshot_.calibrationGuide.hands) stopQuick();
+            else send(Action::cancelHand, hand.calibrationId);
+            break;
         case centerStick: send(Action::joystickCenter); break;
         case finishStick: send(Action::joystickFinish); break;
         case pair: send(Action::pairStart); break;
@@ -362,7 +438,8 @@ private:
             else status_ = L"Enter a channel between 0 and 100.";
             break;
         }
-        case vibrate: send(Action::haptic, 0, .12f, .8f); break;
+        case vibrate: send(Action::hapticTest, 0); break;
+        case vibrateSecond: send(Action::hapticTest, 1); break;
         case useHand: settings.enabled = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
         case useJoystick: settings.joystick = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
         case useHaptics: settings.haptics = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
@@ -402,6 +479,9 @@ private:
                 }
             }
             break;
+        case handResponse:
+            openHandResponse();
+            break;
         case applyPose:
             try {
                 auto next = settings;
@@ -424,6 +504,9 @@ private:
                 next.position = {parse<float>(field(posX)), parse<float>(field(posY)), parse<float>(field(posZ))};
                 next.rotation = {parse<float>(field(rotX)), parse<float>(field(rotY)), parse<float>(field(rotZ))};
                 if (!validPose(next)) throw std::invalid_argument("Pose out of range");
+                if (next.tracker != settings.tracker || next.trackerSerial != settings.trackerSerial ||
+                    (next.tracker == noTracker && !next.trackerSerial[0] && tracking_.selected[side_] == noTracker))
+                    ++next.trackerSelectionRevision;
                 settings = next;
                 save();
             } catch (const std::exception&) { status_ = L"Enter Auto, a tracker serial, or a device index from 1 to 63, and valid offsets."; }
@@ -464,7 +547,7 @@ private:
             break;
         case dashboard: {
             const auto exe = executableFolder() / "OpenCapDashboard.exe";
-            const auto rc = ShellExecuteW(window_, L"open", exe.c_str(), nullptr, exe.parent_path().c_str(), SW_SHOWNORMAL);
+            const auto rc = ShellExecuteW(window_, L"open", exe.c_str(), L"--show", exe.parent_path().c_str(), SW_SHOWNORMAL);
             if (reinterpret_cast<INT_PTR>(rc) <= 32) status_ = L"Could not start the dashboard executable.";
             break;
         }
@@ -493,6 +576,7 @@ private:
         if (automatic) {
             hand.tracker = noTracker;
             hand.trackerSerial.fill(0);
+            ++hand.trackerSelectionRevision;
         } else {
             const auto tracking = bus_.readTracking();
             if (!tracking || !trackingCurrent(*tracking, now()) || !tracking->count) {
@@ -521,77 +605,119 @@ private:
         else status_ = L"Alignment was applied but could not be saved.";
     }
 
-    void startQuick(unsigned requested) {
-        if (quickMask_) return;
-        const auto time = now();
-        for (std::size_t i = 0; i < handCount; ++i) {
-            const auto bit = 1u << i;
-            const auto side = static_cast<Side>(i);
-            if ((requested & bit) && isLive(snapshot_, side, time) && snapshot_.hands[i].calibrationStep == 0
-                && bus_.send({side, Action::startHand})) quickMask_ |= bit;
-        }
-        if (!quickMask_) {
-            status_ = L"Connect a glove and finish any current calibration.";
-            return;
-        }
-        quickPhase_ = 1;
-        quickDeadline_ = time + 4500;
-        quickDue_ = 0;
-        status_ = L"Starting quick calibration.";
+    bool sendCalibration(Action action) {
+        const std::array commands{Command{Side::left, action, quickId_}, Command{Side::right, action, quickId_}};
+        return bus_.send(commands);
     }
 
-    void stopQuick() {
-        for (std::size_t i = 0; i < handCount; ++i)
-            if (quickMask_ & (1u << i)) bus_.send({static_cast<Side>(i), Action::cancelHand});
-        quickMask_ = 0;
-        status_ = L"Quick calibration stopped.";
+    void startQuick() {
+        auto& guide = snapshot_.calibrationGuide;
+        if (guide.hands) return;
+        const auto time = now();
+        if (!handCalibrationReady(snapshot_, time)) {
+            finishQuick(CalibrationResult::failed, L"Connect both gloves and finish any active joystick calibration.");
+            return;
+        }
+        if (quickId_ == std::numeric_limits<int>::max()) quickId_ = 0;
+        ++quickId_;
+        if (!sendCalibration(Action::startHand)) {
+            finishQuick(CalibrationResult::failed, L"The command queue is busy. Start calibration again.");
+            return;
+        }
+        guide = {(1u << handCount) - 1, 1};
+        quickDeadline_ = time + captureTimeout;
+        status_.clear();
+    }
+
+    void finishQuick(CalibrationResult result, std::wstring message) {
+        auto& guide = snapshot_.calibrationGuide;
+        guide = {};
+        guide.result = result;
+        std::copy_n(message.data(), (std::min)(message.size(), guide.message.size() - 1), guide.message.data());
+        status_ = std::move(message);
+    }
+
+    void stopQuick(std::wstring reason = L"Hand calibration canceled.", CalibrationResult result = CalibrationResult::canceled) {
+        if (!sendCalibration(Action::cancelHand)) {
+            status_ = L"The command queue is busy. Try canceling calibration again.";
+            return;
+        }
+        finishQuick(result, std::move(reason));
+        voice_.say(status_.c_str());
     }
 
     void guide(Millis time) {
-        if (!quickMask_) return;
+        auto& guide = snapshot_.calibrationGuide;
+        if (!guide.hands) return;
         bool ready = true;
         for (std::size_t i = 0; i < handCount; ++i) {
-            if (!(quickMask_ & (1u << i))) continue;
-            if (!isLive(snapshot_, static_cast<Side>(i), time)) { stopQuick(); return; }
-            if (snapshot_.hands[i].calibrationStep != quickPhase_ % 4) ready = false;
-        }
-        if (!ready) {
-            if (time >= quickDeadline_) stopQuick();
-            return;
-        }
-        if (quickPhase_ == 4) {
-            for (std::size_t i = 0; i < handCount; ++i) {
-                if (!(quickMask_ & (1u << i)) || !snapshot_.hands[i].message[0]) continue;
-                quickMask_ = 0;
-                status_ = (i == 0 ? L"Left glove: " : L"Right glove: ") + widen(snapshot_.hands[i].message.data());
-                voice_.say(L"Calibration needs attention. Check the glove status.");
+            const auto& hand = snapshot_.hands[i];
+            if (!isLive(snapshot_, static_cast<Side>(i), time)) {
+                stopQuick(L"Glove connection lost. Reconnect and start calibration again.", CalibrationResult::failed);
                 return;
             }
-            quickMask_ = 0;
-            status_ = L"Quick calibration complete.";
+            if (hand.calibrationId != quickId_) { ready = false; continue; }
+            if (hand.calibrationResult == CalibrationResult::failed) {
+                stopQuick(hand.message[0] ? widen(hand.message.data()) : L"Could not record the pose. Restart calibration.",
+                          CalibrationResult::failed);
+                return;
+            }
+            const bool saving = guide.phase > captureActions.size();
+            const auto expected = saving ? CalibrationResult::saved : CalibrationResult::active;
+            if (hand.calibrationResult != expected || hand.calibrationStep != (saving ? 0 : guide.phase)) ready = false;
+        }
+        if (!ready) {
+            if (time >= quickDeadline_)
+                stopQuick(L"The glove did not confirm the pose. Restart calibration.", CalibrationResult::failed);
+            return;
+        }
+        if (guide.phase > captureActions.size()) {
+            finishQuick(CalibrationResult::saved, L"Hand calibration complete.");
             voice_.say(L"Calibration complete.");
             return;
         }
-        if (!quickDue_) {
-            status_ = guidance[quickPhase_ - 1];
-            voice_.say(guidance[quickPhase_ - 1]);
-            quickDue_ = time + 3500;
+        if (!guide.captureAt) {
+            voice_.say(calibrationPose(guide.phase));
+            guide.captureAt = time + calibrationCountdown;
             return;
         }
-        if (time < quickDue_) return;
-        for (std::size_t i = 0; i < handCount; ++i)
-            if (quickMask_ & (1u << i)) bus_.send({static_cast<Side>(i), calibration[quickPhase_].action});
-        ++quickPhase_;
-        quickDeadline_ = time + 4500;
-        quickDue_ = 0;
+        if (time < guide.captureAt) return;
+        if (!sendCalibration(captureActions[guide.phase - 1])) {
+            if (time - guide.captureAt >= captureTimeout)
+                stopQuick(L"The command queue is busy. Restart calibration.", CalibrationResult::failed);
+            return;
+        }
+        ++guide.phase;
+        quickDeadline_ = time + captureTimeout;
+        guide.captureAt = 0;
     }
 
     void tick() {
+#ifdef OPENCAP_RECEIVER
+        if (nativeUpdate_.valid()) {
+            if (nativeUpdate_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                resumeReceivers();
+                EnableWindow(GetDlgItem(window_, firmwareUpdates), TRUE);
+                try {
+                    nativeUpdate_.get();
+                    status_ = nativeWireless_ ? L"The glove accepted the update. Power it on again and check its firmware version."
+                                              : L"The device accepted the update. Check the firmware version after it restarts.";
+                } catch (const std::exception& error) { status_ = widen(error.what()); }
+            } else {
+                const auto progress = firmwareProgress_.load();
+                status_ = progress == 100 ? L"Firmware transfer accepted. Keep the device connected until the update completes."
+                    : std::format(L"Firmware update {}%. Keep the device connected.", progress);
+                InvalidateRect(window_, nullptr, FALSE);
+                return;
+            }
+        }
+#endif
         if (steamOverlay_ && WaitForSingleObject(steamOverlay_, 0) == WAIT_OBJECT_0) {
             PostMessageW(window_, WM_CLOSE, 0, 0);
             return;
         }
         const auto time = now();
+
         for (unsigned i = 0; i < 32; ++i) {
             const auto command = bus_.next();
             if (!command) break;
@@ -615,7 +741,8 @@ private:
             }
             if (command->action == Action::channel) {
                 const auto other = 1 - s;
-                if (snapshot_.hands[other].receiver && command->value == snapshot_.hands[other].channel) {
+                if (snapshot_.hands[other].receiver && (command->value == snapshot_.hands[other].channel ||
+                    command->value == snapshot_.hands[other].pendingChannel)) {
                     status_ = L"Choose a different channel from the other glove.";
                     continue;
                 }
@@ -625,10 +752,11 @@ private:
                 continue;
             }
             if (command->action == Action::guidedCalibration) {
-                startQuick(1u << s);
+                startQuick();
                 continue;
             }
-            if (command->action == Action::cancelHand && (quickMask_ & (1u << s))) {
+            if (command->action == Action::cancelHand && !command->value &&
+                snapshot_.calibrationGuide.hands) {
                 stopQuick();
                 continue;
             }
@@ -648,12 +776,23 @@ private:
             }
             if (demo_) {
                 auto& step = demoSteps_[s];
+                auto& result = demoResults_[s];
+                if (isHandCalibration(command->action) && command->action != Action::startHand &&
+                    command->value != demoCalibrationIds_[s]) continue;
                 switch (command->action) {
-                case Action::startHand: if (step != 4) step = 1; break;
+                case Action::startHand:
+                    if (!step) {
+                        demoCalibrationIds_[s] = command->value;
+                        result = CalibrationResult::active;
+                        step = 1;
+                    }
+                    break;
                 case Action::fist: if (step == 1) step = 2; break;
                 case Action::together: if (step == 2) step = 3; break;
-                case Action::spread:
-                case Action::cancelHand: if (step && step <= 3) step = 0; break;
+                case Action::spread: if (step == 3) { step = 0; result = CalibrationResult::saved; } break;
+                case Action::cancelHand:
+                    if (step && step <= 3) { step = 0; result = CalibrationResult::canceled; }
+                    break;
                 case Action::joystickCenter: if (!step || step == 4) step = 4; break;
                 case Action::joystickFinish: if (step == 4) step = 0; break;
                 case Action::pairStart: demoPairing_[s] = true; break;
@@ -691,6 +830,8 @@ private:
             for (std::size_t s = 0; s < handCount; ++s) {
                 snapshot_.hands[s] = demoHand(static_cast<Side>(s), time);
                 snapshot_.hands[s].calibrationStep = demoSteps_[s];
+                snapshot_.hands[s].calibrationId = demoCalibrationIds_[s];
+                snapshot_.hands[s].calibrationResult = demoResults_[s];
                 snapshot_.hands[s].channel = demoChannels_[s];
                 snapshot_.hands[s].pairing = demoPairing_[s];
                 snapshot_.hands[s].jointOffsets = demoOffsets_[s];
@@ -711,23 +852,54 @@ private:
         snapshot_.settings = prefs_.hands;
         for (std::size_t s = 0; s < handCount; ++s)
             applyHandPreferences(snapshot_.hands[s], snapshot_.settings[s]);
-        bus_.publish(snapshot_);
-        stream_.send(snapshot_);
         for (std::size_t s = 0; s < handCount; ++s) {
             const auto count = snapshot_.hands[s].calibrationRequests;
             if (count > lastRequests_[s] && snapshot_.hands[s].calibrationStep == 0)
-                startQuick(1u << s);
+                startQuick();
             lastRequests_[s] = count;
         }
         guide(snapshot_.heartbeat);
-        const auto stage = snapshot_.hands[side_].calibrationStep;
-        if (lastStage_ != stage) {
+        bus_.publish(snapshot_);
+        stream_.send(snapshot_);
+        const auto& selected = snapshot_.hands[side_];
+        const bool gloveLive = isLive(snapshot_, static_cast<Side>(side_), snapshot_.heartbeat);
+        const bool channelAvailable = selected.receiver && selected.pendingChannel < 0;
+        if (channelAvailable != channelAvailable_) {
+            channelAvailable_ = channelAvailable;
+            EnableWindow(GetDlgItem(window_, channelValue), channelAvailable);
+            EnableWindow(GetDlgItem(window_, setChannel), channelAvailable);
+        }
+        if (shownChannel_ != selected.channel && GetFocus() != GetDlgItem(window_, channelValue)) {
+            shownChannel_ = selected.channel;
+            if (shownChannel_ >= 0) SetDlgItemInt(window_, channelValue, shownChannel_, FALSE);
+            else SetDlgItemTextW(window_, channelValue, L"");
+        }
+        const auto revision = selected.controllerRevision;
+        if (lastControllerRevision_ != revision || lastVibrationAvailable_ != gloveLive) {
+            lastControllerRevision_ = revision;
+            lastVibrationAvailable_ = gloveLive;
+            SetDlgItemTextW(window_, vibrate, revision == 2 ? L"Test low vibration" : L"Test motor 1");
+            SetDlgItemTextW(window_, vibrateSecond, revision == 2 ? L"Test high vibration" : L"Test motor 2");
+            EnableWindow(GetDlgItem(window_, vibrate), gloveLive);
+            EnableWindow(GetDlgItem(window_, vibrateSecond), gloveLive);
+        }
+        const auto stage = selected.calibrationStep;
+        const bool guiding = snapshot_.calibrationGuide.hands != 0;
+        const bool calibrationReady = handCalibrationReady(snapshot_, snapshot_.heartbeat);
+        if (lastCalibrationReady_ != calibrationReady) {
+            lastCalibrationReady_ = calibrationReady;
+            EnableWindow(GetDlgItem(window_, nextPose), calibrationReady);
+        }
+        if (lastStage_ != stage || lastGuiding_ != guiding || lastCalibrationLive_ != gloveLive) {
             lastStage_ = stage;
-            SetDlgItemTextW(window_, nextPose, calibration[(std::min)(stage, 4u)].label);
-            EnableWindow(GetDlgItem(window_, nextPose), stage != 4);
-            EnableWindow(GetDlgItem(window_, cancelPose), stage >= 1 && stage <= 3);
-            EnableWindow(GetDlgItem(window_, centerStick), stage == 0 || stage == 4);
-            EnableWindow(GetDlgItem(window_, finishStick), stage == 4);
+            lastGuiding_ = guiding;
+            lastCalibrationLive_ = gloveLive;
+            SetDlgItemTextW(window_, nextPose, guiding ? L"Calibration running…" : L"Calibrate both gloves");
+            EnableWindow(GetDlgItem(window_, cancelPose), guiding || (stage >= 1 && stage <= 3));
+            EnableWindow(GetDlgItem(window_, centerStick), gloveLive && !guiding && (stage == 0 || stage == 4));
+            EnableWindow(GetDlgItem(window_, finishStick), gloveLive && stage == 4);
+            if (stage == 4 && GetFocus() == GetDlgItem(window_, centerStick))
+                SetFocus(GetDlgItem(window_, finishStick));
         }
         if (time - lastPaint_ >= 50) {
             if (const auto update = bus_.readTracking()) tracking_ = *update;
@@ -746,6 +918,102 @@ private:
             status_ = *exported ? L"Hand sample exported." : L"Could not write the export.";
     }
 
+    void openHandResponse() {
+#ifdef OPENCAP_RECEIVER
+        const auto side = static_cast<Side>(side_);
+        if (receiver_ && isLive(snapshot_, side, now()) && snapshot_.hands[side_].calibrated) {
+            if (const auto curves = receiver_->handCurves(side)) {
+                if (const auto edit = editHandCurve(window_, *curves)) {
+                    if (!isLive(snapshot_, side, now()) || !bus_.send(Command{.side = side, .action = Action::setHandCurve,
+                            .value = static_cast<int>(edit->channel), .curve = edit->curve}))
+                        status_ = L"Connect the glove and try saving the hand response again.";
+                }
+                return;
+            }
+        }
+#endif
+        status_ = L"Connect and calibrate this glove before editing its response.";
+    }
+
+#ifdef OPENCAP_RECEIVER
+    void firmwareMenu() {
+        const auto menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, 1, L"Update via USB…");
+        AppendMenuW(menu, MF_STRING, 2, L"Update a wireless glove…");
+        RECT button{};
+        GetWindowRect(GetDlgItem(window_, firmwareUpdates), &button);
+        const auto action = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY,
+                                           button.left, button.bottom, 0, window_, nullptr);
+        DestroyMenu(menu);
+        if (action) nativeFirmwareUpdate(action == 2);
+    }
+
+    void pauseReceivers() {
+        if (snapshot_.calibrationGuide.hands) stopQuick();
+        receiver_.reset();
+        snapshot_.hands = {};
+        bus_.publish(snapshot_);
+        stream_.send(snapshot_);
+    }
+
+    void nativeFirmwareUpdate(bool radio) {
+        if (nativeUpdate_.valid()) return;
+        wchar_t chosen[MAX_PATH]{};
+        OPENFILENAMEW request{};
+        request.lStructSize = sizeof(request);
+        request.hwndOwner = window_;
+        request.lpstrFilter = L"UDCAP firmware image (*.bin)\0*.bin\0\0";
+        request.lpstrFile = chosen;
+        request.nMaxFile = MAX_PATH;
+        request.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&request)) return;
+        try {
+            auto image = readUpdateImage(chosen);
+            std::optional<WirelessFirmwareTarget> wireless;
+            if (radio) {
+                if (image.target == FirmwareTarget::receiver)
+                    throw std::runtime_error("Use the USB update for a receiver image.");
+                const auto side = image.target == FirmwareTarget::leftGlove ? Side::left : Side::right;
+                if (receiver_) wireless = receiver_->wirelessFirmwareTarget(side);
+                if (!wireless) throw std::runtime_error("Power on the glove that matches the image and wait for a wireless connection.");
+            }
+            const auto device = image.target == FirmwareTarget::receiver ? L"single-hand receiver" :
+                                image.target == FirmwareTarget::leftGlove ? L"left glove" : L"right glove";
+            const auto& v = image.version;
+            const auto prompt = std::format(L"Update the {} to {}.{}.{}? {}", device, +v.major, +v.minor, v.revision,
+                radio ? L"Keep the glove powered near its receiver until the update finishes."
+                      : L"Connect one device of this type via USB and keep it connected until the update finishes.");
+            if (MessageBoxW(window_, prompt.c_str(), L"Firmware update", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) != IDOK) return;
+            pauseReceivers();
+            firmwareProgress_.store(0);
+            nativeWireless_ = radio;
+            nativeUpdate_ = std::async(std::launch::async, [this, image = std::move(image), wireless = std::move(wireless)] {
+                const auto progress = [this](unsigned completed) { firmwareProgress_.store(completed); };
+                if (wireless) updateWirelessGlove(image, *wireless, progress);
+                else updateWiredDevice(image, progress);
+            });
+            EnableWindow(GetDlgItem(window_, firmwareUpdates), FALSE);
+        } catch (const std::exception& error) {
+            if (!receiver_) resumeReceivers();
+            status_ = widen(error.what());
+        }
+    }
+#endif
+
+    void resumeReceivers() {
+        status_.clear();
+#ifdef OPENCAP_RECEIVER
+        if (folder_.empty()) return;
+        try {
+            auto vendor = readUdcapPreferences(findUdcapSources(folder_.parent_path()));
+            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver), prefs_.udcapImport);
+        } catch (const std::exception& error) {
+            status_ = widen(error.what());
+        }
+#endif
+    }
+
     bool demo_;
     std::filesystem::path folder_;
     Preferences prefs_{};
@@ -755,16 +1023,28 @@ private:
     Stream stream_;
     Voice voice_;
     HANDLE steamOverlay_{};
+    unsigned lastControllerRevision_{UINT32_MAX};
+    bool lastVibrationAvailable_{}, lastGuiding_{}, lastCalibrationLive_{}, lastCalibrationReady_{};
+    int shownChannel_{-1};
+    std::optional<bool> channelAvailable_;
 #ifdef OPENCAP_RECEIVER
     std::unique_ptr<Receiver> receiver_;
+    std::atomic<unsigned> firmwareProgress_{};
+    bool nativeWireless_{};
+    std::future<void> nativeUpdate_;
 #endif
     HWND window_{};
-    HFONT font_{}, title_{};
+    DesktopPage page_{DesktopPage::gloves};
+    std::optional<DesktopPage> creatingPage_;
+    std::array<std::vector<HWND>, pageNames.size()> pageControls_;
+    HFONT font_{}, title_{}, section_{};
     HBRUSH brush_{};
     std::size_t side_{};
     unsigned lastStage_{UINT32_MAX};
     Millis lastPaint_{};
     std::array<unsigned, handCount> demoSteps_{}, lastRequests_{};
+    std::array<int, handCount> demoCalibrationIds_{};
+    std::array<CalibrationResult, handCount> demoResults_{};
     std::array<int, handCount> demoChannels_{20, 40};
     std::array<bool, handCount> demoPairing_{};
     std::array<std::array<Vec3, jointCount>, handCount> demoOffsets_{};
@@ -772,8 +1052,8 @@ private:
     std::array<StickHold, handCount> stickHolds_{};
     std::wstring status_;
     bool bothPairing_{};
-    unsigned quickMask_{}, quickPhase_{};
-    Millis quickDue_{}, quickDeadline_{};
+    int quickId_{};
+    Millis quickDeadline_{};
 };
 }
 

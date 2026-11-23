@@ -12,10 +12,7 @@
 namespace opencap {
 struct ReceiverPreferences {
     std::map<std::string, double> controller;
-    struct Curve {
-        double min{}, max{}, balance{.5}, offset{};
-    };
-    std::array<Curve, 21> curves{};
+    HandCurves curves{};
     bool hasCurves{};
     bool empty() const { return controller.empty() && !hasCurves; }
 };

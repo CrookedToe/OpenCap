@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <condition_variable>
 #include <filesystem>
@@ -76,6 +77,7 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
     std::mutex mutex;
     std::condition_variable changes;
     bool sawV2Axis = false, sawV2Button = false;
+    bool sawSystemPress = false, sawSystemRelease = false;
     Writes writes;
     auto transport = port(&writes);
     UdCapV1Core core(transport);
@@ -85,13 +87,27 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
             std::abs(packet->joystickData.joyX - .3f) < .001f && packet->joystickData.joyY == 0) sawV2Axis = true;
         if (packet->commandType == CMD_INPUT_BUTTON && packet->button.btnB &&
             packet->button.btnJoyStick && !packet->button.btnA && !packet->button.btnMenu) sawV2Button = true;
+        if (packet->commandType == CMD_INPUT_BUTTON && packet->button.btnA && !packet->button.btnB &&
+            !packet->button.btnJoyStick && !packet->button.btnPower) {
+            if (packet->button.btnMenu) sawSystemPress = true;
+            else if (sawSystemPress) sawSystemRelease = true;
+        }
         changes.notify_all();
     });
     connect(*transport, glove);
+    const std::vector<std::uint8_t> startStream{85, 170, 1, 1, 3, 1, 65, 67, 138};
+    require(std::ranges::find(writes, startStream) != writes.end(),
+            "Request the consumer glove's combined input stream");
     calibrate(core, *transport, captures);
     core.mcuSendHaptic(.125f, .8f, 140);
     require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 3, 0, 12, 8, 32},
             "Route legacy haptics to the glove's vibration command");
+    require(core.getControllerRevision() == 1, "Report Controller 1.0 from the input frame");
+    core.mcuTestHaptic(false);
+    core.mcuTestHaptic(true);
+    require(writes[writes.size() - 2] == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 2, 0, 10, 10, 31} &&
+            writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 1, 0, 10, 10, 30},
+            "Test the two Controller 1.0 motors independently");
     std::array<std::int16_t, 15> compact{};
     compact[12] = 2600;
     compact[13] = 2000;
@@ -102,9 +118,28 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
         require(changes.wait_for(lock, std::chrono::seconds(2), [&] { return sawV2Axis && sawV2Button; }),
                 "Decode the Controller 2.0 joystick and buttons from the compact frame");
     }
+    frame(*transport, std::span(compact).first(14));
+    frame(*transport, std::span(compact).first(12));
+    require(core.getControllerRevision() == 2, "Short sensor frames preserve the detected Controller 2.0 revision");
+    compact[14] = 0x80 | 0x10 | 0x02;
+    frame(*transport, compact);
+    compact[14] = 0x80 | 0x02;
+    frame(*transport, compact);
+    {
+        std::unique_lock lock(mutex);
+        require(changes.wait_for(lock, std::chrono::seconds(2), [&] { return sawSystemRelease; }),
+                "Controller 2.0 System presses and releases independently of the A and power buttons");
+    }
     core.mcuSendHaptic(.125f, .8f, 140);
     require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 0x98, 3, 140, 0, 125, 0, 125},
             "Encode Controller 2.0 haptics with independent strength, frequency and time");
+    require(core.getControllerRevision() == 2, "Report Controller 2.0 from a compact input frame");
+    core.mcuTestHaptic(false);
+    core.mcuTestHaptic(true);
+    require(writes[writes.size() - 2] == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 88, 2, 100, 0, 232, 3, 130} &&
+            writes.back() == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 232, 3, 100, 0, 232, 3, 19},
+            "Use the Controller 2.0 low and high actuator patterns");
+    frame(*transport, compact);
     core.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
     core.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_CENTER);
     core.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
@@ -112,6 +147,13 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
         const std::vector<std::uint8_t> expected{85, 170, 1, 0xcc, 1, step, static_cast<std::uint8_t>(0xce + step)};
         require(writes[writes.size() - 4 + step] == expected, "Send Controller 2.0 calibration actions in order");
     }
+    send(*transport, CMD_LINK_STATE, {0});
+    send(*transport, CMD_LINK_STATE, {1});
+    frame(*transport, std::span(compact).first(12));
+    require(core.getControllerRevision() == 0, "An unannounced controller does not inherit the previous link's revision");
+    core.mcuTestHaptic(false);
+    require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 2, 0, 10, 10, 31},
+            "A linked glove can run the legacy motor test before controller identification");
 }
 }
 
@@ -148,6 +190,9 @@ int main() {
             catch (const std::runtime_error&) { rejected = true; }
             require(rejected && core.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_COMPLETED &&
                     core.handCalibrationSamples() == captures, "Preserve the last good calibration after a failed attempt");
+            auto curves = core.getHandResponse();
+            curves[6] = {-70, 10, .65, -5};
+            core.setHandResponse(curves);
             require(core.savePref(path.string()), "Save calibration using the normal glove profile");
         }
         {
@@ -156,6 +201,10 @@ int main() {
             connect(*transport, glove);
             require(core.loadPref(path.string()) && core.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_COMPLETED &&
                     core.handCalibrationSamples() == captures, "Restore calibration in a new core instance");
+            const auto adjustment = core.getHandResponse()[6];
+            require(adjustment.outputMin == -70 && adjustment.outputMax == 10 &&
+                    adjustment.balance == .65 && adjustment.offset == -5,
+                    "Restore an edited finger response curve in a new core instance");
             send(*transport, CMD_LINK_STATE, {0});
             connect(*transport, glove);
             core.tryRestoreHandCalibration();

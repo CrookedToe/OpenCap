@@ -118,12 +118,18 @@ std::optional<TrackingSnapshot> Bus::readTracking() const {
 }
 
 bool Bus::send(const Command& command) {
+    return send(std::span{&command, 1});
+}
+
+bool Bus::send(std::span<const Command> commands) {
     const Lock lock(impl_->mutex, 1);
     if (!impl_->validate(lock)) return false;
     auto& state = *impl_->state;
-    if (state.count == queueSize) return false;
-    state.commands[(state.readPosition + state.count) % queueSize] = command;
-    ++state.count;
+    if (commands.size() > queueSize - state.count) return false;
+    for (const auto& command : commands) {
+        state.commands[(state.readPosition + state.count) % queueSize] = command;
+        ++state.count;
+    }
     return true;
 }
 

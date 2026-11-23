@@ -1,5 +1,6 @@
 #include "osc_compat.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace opencap {
@@ -57,5 +58,31 @@ std::array<AvatarParameter, avatarParameterCount> avatarParameters(const Snapsho
         result[i] = {axis.control, avatarBits((angle + axis.add) / axis.divisor - bias)};
     }
     return result;
+}
+
+std::array<Quaternion, jointCount> vmcFingerRotations(const Hand& hand, Side side) {
+    const auto& a = hand.angles;
+    const float bend = side == Side::left ? -1.0f : 1.0f;
+    const std::array<Vec3, jointCount> angles{{
+        {a[21], -bend * a[7], bend * a[6]}, {0, 0, bend * a[5]}, {0, 0, bend * a[4]},
+        {0, a[11], bend * a[10]}, {0, 0, bend * a[9]}, {0, 0, bend * a[8]},
+        {0, bend * a[15], bend * a[14]}, {0, 0, bend * a[13]}, {0, 0, bend * a[12]},
+        {a[22], bend * a[19], bend * a[18]}, {0, 0, bend * a[17]}, {0, 0, bend * a[16]},
+        {1.2f * a[3], -.3f * bend * a[2], .3f * bend * a[20]},
+        {0, -bend * a[1], 0}, {0, -bend * a[0], 0}
+    }};
+    std::array<Quaternion, jointCount> result{};
+    std::ranges::transform(angles, result.begin(), eulerDegrees);
+    return result;
+}
+
+std::array<VmcBlend, 8> vmcControllerInputs(const Hand& hand) {
+    const auto pressed = [&](Button button) { return hand.buttons & bit(button) ? 1.0f : 0.0f; };
+    return {{
+        {"JoyX_Positive", std::max(0.0f, hand.stickX)}, {"JoyX_Negative", std::max(0.0f, -hand.stickX)},
+        {"JoyY_Positive", std::max(0.0f, hand.stickY)}, {"JoyY_Negative", std::max(0.0f, -hand.stickY)},
+        {"Button_A", pressed(Button::a)}, {"Button_B", pressed(Button::b)},
+        {"Button_Joy", pressed(Button::stick)}, {"Button_Menu", pressed(Button::system)}
+    }};
 }
 }

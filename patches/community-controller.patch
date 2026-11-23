@@ -1,3 +1,23 @@
+--- a/src/UdCapProbe.h
++++ b/src/UdCapProbe.h
+@@ -5,7 +5,6 @@
+ #ifndef SERIALREBORN_UDCAPPROBE_H
+ #define SERIALREBORN_UDCAPPROBE_H
+ 
+-#include <SerialCommon.h>
+ #include <PortAccessor.h>
+ 
+ enum UdCapProbeType {
+--- a/src/UdCapProbe.cpp
++++ b/src/UdCapProbe.cpp
+@@ -2,6 +2,7 @@
+ // Created by max_3 on 2025/5/11.
+ //
+ 
++#include <condition_variable>
+ #include <utility>
+ #include "UdCapProbe.h"
+ #include "UdCapSerial.h"
 --- a/src/UdCapV1Core.h
 +++ b/src/UdCapV1Core.h
 @@ -49,7 +49,9 @@
@@ -11,55 +31,60 @@
      CMD_BATTERY = 5,
      CMD_SERIAL = 6,
      CMD_LINK_STATE = 7,
-@@ -365,6 +367,8 @@
+@@ -365,6 +367,10 @@
      void mcuGetLinkState();
  
      void mcuSendVibration(int index, float second, int strength);
 +
 +    void mcuSendHaptic(float seconds, float amplitude, float frequency);
++    void mcuTestHaptic(bool second);
++    unsigned getControllerRevision() const;
  
      void runCalibration(UdCapV1DeviceCaliType type);
  
-@@ -459,6 +463,9 @@
+@@ -459,6 +465,9 @@
      UdCapV1HandData lastAngle{};
      void setCalibrationPose(UdCapV1HandCaliType type, const std::array<int16_t, 19> &sample);
      std::array<int16_t, 19> lastRaw{};
 +    bool controllerPresent = false;
-+    bool controllerV2 = false;
++    unsigned controllerRevision = 0;
 +    bool joystickDeviceCalibration = false;
      CalibrationSamples pendingCalibration{};
      std::optional<CalibrationSamples> savedCalibration;
      std::atomic<UdCapV1JoystickCaliStat> joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
 --- a/src/UdCapV1Core.cpp
 +++ b/src/UdCapV1Core.cpp
-@@ -180,6 +180,8 @@
+@@ -180,6 +180,9 @@
                  if (udState != UD_INIT_STATE_INIT) {
                      udState = UD_INIT_STATE_NOT_CONNECT;
                      caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
-+                    controllerPresent = controllerV2 = false;
++                    controllerPresent = false;
++                    controllerRevision = 0;
 +                    joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
                      UdCapV1MCUPacket linkPacket{};
                      linkPacket.address = 1;
                      linkPacket.commandType = CommandType::CMD_LINK_STATE;
-@@ -307,6 +309,8 @@
+@@ -307,6 +310,9 @@
          if (udCapSerial == serial) return;
          savedCalibration.reset();
          caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
-+        controllerPresent = controllerV2 = false;
++        controllerPresent = false;
++        controllerRevision = 0;
 +        joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
          udCapSerial = serial;
          target = serial.back() == 'L' ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
          isEnterprise = serial.substr(0, 2) == "AB";
-@@ -341,6 +345,8 @@
+@@ -341,6 +347,9 @@
              }
              udState = UdState::UD_INIT_STATE_NOT_CONNECT;
              caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
-+            controllerPresent = controllerV2 = false;
++            controllerPresent = false;
++            controllerRevision = 0;
 +            joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
          } else if (linkState == 1) {
              packet.udState = UdState::UD_INIT_STATE_CONNECTED;
  
-@@ -445,7 +451,6 @@
+@@ -445,7 +454,6 @@
          callListenCallback(packet);
          // Start Calc
          memset(&lastAngle, 0, sizeof(lastAngle));
@@ -67,7 +92,7 @@
          if (deData.size() >= 32) {
              lastAngle.f0 = (((float) (iData[12])) - 1000.0) / 1000.0;
              lastAngle.f1 = (((float) (iData[13])) - 1000.0) / 1000.0;
-@@ -464,11 +469,16 @@
+@@ -464,11 +472,19 @@
          lastAngle.f13 = (float) (iData[9]);
          lastAngle.f14 = (float) (iData[10]);
          lastAngle.f15 = (float) (iData[11]);
@@ -78,18 +103,21 @@
 -            hasController = true;
 +        const bool compactController = deData.size() == 28 || deData.size() == 30;
 +        controllerPresent = compactController || deData.size() == 38;
-+        controllerV2 = false;
 +        if (controllerPresent) {
 +            const std::size_t start = compactController ? 12 : 16;
 +            lastAngle.f16 = static_cast<float>(iData[start]);
 +            lastAngle.f17 = static_cast<float>(iData[start + 1]);
-+            const int buttons = iData[start + 2];
-+            controllerV2 = buttons >= 128;
-+            lastAngle.f18 = static_cast<float>(controllerV2 ? buttons - 128 : buttons);
++            if (deData.size() == 30 || deData.size() == 38) {
++                const auto buttons = iData[start + 2];
++                if (buttons >= 0 && buttons <= 255) {
++                    controllerRevision = buttons & 0x80 ? 2 : 1;
++                    lastAngle.f18 = static_cast<float>(buttons & 0x7f);
++                }
++            }
          }
  
          if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
-@@ -628,22 +638,25 @@
+@@ -628,22 +644,26 @@
                      callListenCallback(packetSkeleton);
                  }
                  {
@@ -115,6 +143,7 @@
 -                        float num = (lastAngle.f16 - xCenterData) / ((xMaxData - xMinData) / 2.0);
 -                        float num2 = (lastAngle.f17 - yCenterData) / ((yMaxData - yMinData) / 2.0);
 +                        const float v2Center = 2000.0f;
++                        const bool controllerV2 = controllerRevision == 2;
 +                        const float xRange = controllerV2 ? v2Center : (xMaxData - xMinData) / 2.0f;
 +                        const float yRange = controllerV2 ? v2Center : (yMaxData - yMinData) / 2.0f;
 +                        float num = xRange > 0 ? (lastAngle.f16 - (controllerV2 ? v2Center : xCenterData)) / xRange : 0;
@@ -122,7 +151,7 @@
                          if (num > 1.0) {
                              num = 1.0;
                          }
-@@ -665,7 +678,7 @@
+@@ -665,7 +685,7 @@
                          joyStickPacket.commandType = CommandType::CMD_INPUT_JOYSTICK;
                          joyStickPacket.joystickData.joyX = num;
                          joyStickPacket.joystickData.joyY = num2;
@@ -131,20 +160,32 @@
                              joyStickPacket.joystickData.joyX = 0.0;
                              joyStickPacket.joystickData.joyY = 0.0;
                          }
-@@ -681,9 +694,9 @@
+@@ -681,9 +701,12 @@
                      constexpr uint16_t B_BIT     = 0x0002; // 0000 0000 0000 0010
                      constexpr uint16_t JOY_BIT   = 0x0004; // 0000 0000 0000 0100
                      constexpr uint16_t POWER_BIT = 0x0008; // 0000 0000 0000 1000
++                    constexpr uint16_t SYSTEM_BIT = 0x0010;
 -                    packetInputBtn.button.btnA = num3 & A_BIT;
 -                    packetInputBtn.button.btnB = num3 & B_BIT;
 -                    if (packetInputBtn.button.btnA && packetInputBtn.button.btnB) {
++                    const bool controllerV2 = controllerRevision == 2;
 +                    packetInputBtn.button.btnA = num3 & (controllerV2 ? B_BIT : A_BIT);
 +                    packetInputBtn.button.btnB = num3 & (controllerV2 ? A_BIT : B_BIT);
++                    packetInputBtn.button.btnMenu = (num3 & SYSTEM_BIT) != 0;
 +                    if (!controllerV2 && packetInputBtn.button.btnA && packetInputBtn.button.btnB) {
                          packetInputBtn.button.btnMenu = true;
                          packetInputBtn.button.btnA = false;
                          packetInputBtn.button.btnB = false;
-@@ -850,10 +863,30 @@
+@@ -831,7 +852,7 @@
+     // needs the start packet after the requested delay to resume streaming.
+     if (portAccessor->isOpen()) {
+         std::vector<uint8_t> s;
+-        s.push_back(2);
++        s.push_back(isEnterprise ? 2 : 1);
+         if (isEnterprise) {
+             s.push_back(66);
+             s.push_back(86);
+@@ -850,10 +871,48 @@
  }
  
  void UdCapV1Core::mcuSendVibration(int index, float second, int strength) {
@@ -159,7 +200,7 @@
 +    std::lock_guard guard(stateMutex);
 +    if (!std::isfinite(seconds) || !std::isfinite(amplitude) || seconds <= 0 || amplitude <= 0) return;
 +    amplitude = std::min(amplitude, 1.0f);
-+    if (!controllerV2) {
++    if (controllerRevision != 2) {
 +        mcuSendVibration(3, seconds, static_cast<int>(std::lround(amplitude * 10.0f)));
 +        return;
 +    }
@@ -173,19 +214,37 @@
 +        static_cast<uint8_t>(rate), static_cast<uint8_t>(rate >> 8),
 +        static_cast<uint8_t>(duration), static_cast<uint8_t>(duration >> 8)
 +    });
++}
++
++unsigned UdCapV1Core::getControllerRevision() const {
++    std::lock_guard guard(stateMutex);
++    return controllerRevision;
++}
++
++void UdCapV1Core::mcuTestHaptic(bool second) {
++    std::lock_guard guard(stateMutex);
++    if (controllerRevision != 2) {
++        mcuSendVibration(second ? 1 : 2, .1f, 10);
++        return;
++    }
++    const uint16_t strength = second ? 1000 : 600;
++    sendCommand(1, CMD_VIBRATION_V2, {
++        2, 0, static_cast<uint8_t>(strength), static_cast<uint8_t>(strength >> 8),
++        100, 0, 0xe8, 0x03
++    });
  }
  
  void UdCapV1Core::setTriggerButtonMin(float value) {
-@@ -943,6 +976,8 @@
+@@ -943,6 +1002,8 @@
          caliPacket.isReady = false;
          callListenCallback(caliPacket);
      } else if (type == UdCapV1DeviceCaliType::UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK) {
 +        if (!controllerPresent) throw std::runtime_error("No joystick data is available.");
-+        joystickDeviceCalibration = controllerV2;
++        joystickDeviceCalibration = controllerRevision == 2;
          joystickCaliStat = UdCapV1JoystickCaliStat::UDCAP_V1_JOYSTICK_CALI_STAT_CAPTURE_CENTER;
      }
  }
-@@ -1090,6 +1125,7 @@
+@@ -1090,6 +1151,7 @@
          caliPacket.isReady = true;
          callListenCallback(caliPacket);
      } else if (type == UdCapV1DeviceCaliType::UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK) {
@@ -193,7 +252,7 @@
          joystickCaliStat = UdCapV1JoystickCaliStat::UDCAP_V1_JOYSTICK_CALI_STAT_OK;
      }
  }
-@@ -1132,8 +1168,13 @@
+@@ -1132,8 +1194,13 @@
      }
      if (joystickCaliStat == UdCapV1JoystickCaliStat::UDCAP_V1_JOYSTICK_CALI_STAT_CAPTURE_CENTER) {
          if (type == UdCapV1JoystickCaliType::UDCAP_V1_JOYSTICK_CALI_TYPE_CENTER) {

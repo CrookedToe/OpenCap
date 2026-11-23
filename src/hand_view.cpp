@@ -1,5 +1,6 @@
 #include "hand_view.hpp"
 #include "bridge.hpp"
+#include "vr_skeleton.hpp"
 
 #include <windowsx.h>
 #include <algorithm>
@@ -16,6 +17,7 @@ constexpr COLORREF active = RGB(96, 224, 201);
 constexpr COLORREF inactive = RGB(128, 146, 162);
 constexpr INT_PTR modeButton = 10, resetButton = 11;
 constexpr std::array<const wchar_t*, 5> fingers{L"Thumb", L"Index", L"Middle", L"Ring", L"Pinky"};
+constexpr std::array gradeColors{RGB(255, 144, 137), RGB(232, 197, 116), RGB(171, 224, 141), RGB(102, 205, 155)};
 
 struct View {
     Bus bus;
@@ -44,34 +46,21 @@ struct View {
     }
 
     void drawHand(HDC dc, const RECT& size, const Hand& hand, bool live) const {
-        constexpr std::array<Vec3, 5> base{{{-.60f, -.2f, .05f}, {-.35f, .25f, 0},
-                                          {-.09f, .32f, 0}, {.15f, .26f, 0}, {.36f, .13f, 0}}};
-        constexpr std::array length{.38f, .45f, .50f, .47f, .36f};
-        constexpr std::array splay{45.0f, 11.0f, 0.0f, -8.0f, -17.0f};
-        const auto scale = static_cast<float>((std::min)(size.right, size.bottom - 64)) * .36f;
+        const auto chains = makeHandPreview(side, live ? hand : Hand{});
+        const auto scale = static_cast<float>((std::min)(size.right, size.bottom - 88)) * 3.6f;
         const auto x0 = size.right / 2;
-        const auto y0 = (size.bottom + 85) / 2;
-        const auto mirror = side == Side::left ? 1.0f : -1.0f;
+        const auto y0 = static_cast<int>((size.bottom + 88) / 2 + .08f * scale);
         const auto pen = CreatePen(PS_SOLID, 4, live ? active : inactive);
         const auto fill = CreateSolidBrush(live ? active : inactive);
         const auto previousPen = SelectObject(dc, pen);
         const auto previousFill = SelectObject(dc, fill);
-        const auto wrist = project({0, -.62f, 0}, x0, y0, scale);
-        for (std::size_t i = 0; i < base.size(); ++i) {
-            Vec3 joint = base[i];
-            joint.x *= mirror;
-            auto p = project(joint, x0, y0, scale);
-            MoveToEx(dc, wrist.x, wrist.y, nullptr);
-            LineTo(dc, p.x, p.y);
-            auto orientation = eulerDegrees({0, 0, splay[i] * mirror});
-            for (unsigned j = 0; j < 3; ++j) {
-                if (live) orientation = multiply(orientation, hand.joints[i * 3 + j].rotation);
-                const auto bone = rotate(orientation, {length[i] * (1 - j * .2f), 0, 0});
-                joint = {joint.x + bone.z, joint.y + bone.x, joint.z + bone.y};
+        for (const auto& chain : chains) {
+            auto p = project({}, x0, y0, scale);
+            for (const auto& joint : chain) {
                 const auto next = project(joint, x0, y0, scale);
                 MoveToEx(dc, p.x, p.y, nullptr);
                 LineTo(dc, next.x, next.y);
-                Ellipse(dc, p.x - 4, p.y - 4, p.x + 4, p.y + 4);
+                Ellipse(dc, next.x - 3, next.y - 3, next.x + 3, next.y + 3);
                 p = next;
             }
         }
@@ -113,9 +102,10 @@ struct View {
                 TextOutW(dc, 20, 300, label.data(), static_cast<int>(label.size()));
                 for (std::size_t i = 0; i < hand.quality.counts.size(); ++i) {
                     const auto count = hand.quality.counts[i];
-                    const auto value = std::format(L"{}  {}", i+4, count);
-                    SetTextColor(dc, count <= calibrationMovementThreshold ? RGB(255, 166, 132) : active);
-                    TextOutW(dc, 20 + static_cast<int>(i % 4)*125, 327 + static_cast<int>(i / 4)*24,
+                    const auto grade = calibrationGrade(i, count);
+                    const auto value = std::format(L"{}   {}   {}", i+4, count, widen(calibrationGradeName(grade)));
+                    SetTextColor(dc, gradeColors[static_cast<std::size_t>(grade)]);
+                    TextOutW(dc, 20 + static_cast<int>(i % 3)*150, 327 + static_cast<int>(i / 3)*24,
                              value.c_str(), static_cast<int>(value.size()));
                 }
             }

@@ -66,8 +66,24 @@ Preferences loadSettings(const std::filesystem::path& path) {
     s.oscAddress = s.address;
     if (version >= 3 && !(input >> std::quoted(s.oscAddress) >> settings.udcapImport)) return {};
     if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> settings.quickStick)) return {};
-    if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> settings.steamLifecycle)) return {};
+    bool lifecycle = false;
+    if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> lifecycle)) return {};
+    // Older versions wrote false even if the user never changed the switch.
+    bool configured = lifecycle;
+    if (version >= 3 && (input >> std::ws) && !input.eof() && !(input >> configured)) return {};
+    if (configured) settings.steamLifecycle = lifecycle;
+    input >> std::ws;
+    if (version >= 3 && !input.eof()) {
+        bool includePrereleases{};
+        if (input >> includePrereleases) settings.includePrereleases = includePrereleases;
+    }
     return settings;
+}
+
+bool steamLifecycleEnabled(const std::filesystem::path& path, const Preferences& settings) {
+    if (settings.steamLifecycle.has_value()) return *settings.steamLifecycle;
+    std::error_code error;
+    return !path.empty() && std::filesystem::is_regular_file(path / "steamvr-switch.json", error);
 }
 
 bool saveSettings(const std::filesystem::path& path, const Preferences& settings) {
@@ -91,12 +107,43 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
         const auto& s = settings.stream;
         output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey
                << ' ' << std::quoted(s.oscAddress) << ' ' << settings.udcapImport << ' ' << settings.quickStick
-               << ' ' << settings.steamLifecycle << '\n';
+               << ' ' << settings.steamLifecycle.value_or(false) << ' ' << settings.steamLifecycle.has_value()
+               << ' ' << settings.includePrereleases << '\n';
         output.close();
         if (!output) return false;
     }
     return MoveFileExW(tmp.c_str(), (path / "settings.txt").c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+
+bool launchUpdater(bool automatic, bool includePrereleases) {
+    const auto folder = executableFolder();
+    const auto script = folder / L"Install-OpenCap.ps1";
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(folder / L"OpenCap.version", error) ||
+        !std::filesystem::is_regular_file(script, error)) return false;
+    const bool installed = std::filesystem::is_regular_file(folder / L".opencap-package", error);
+    if (automatic && !installed) return false;
+
+    wchar_t system[MAX_PATH]{};
+    const auto length = GetSystemDirectoryW(system, MAX_PATH);
+    if (!length || length >= MAX_PATH) return false;
+    const auto powershell = std::filesystem::path(system) / L"WindowsPowerShell/v1.0/powershell.exe";
+    auto command = L"\"" + powershell.wstring() + L"\" -NoProfile -NonInteractive -STA -ExecutionPolicy RemoteSigned";
+    command += L" -File \"" + script.wstring() + L"\" -Action ";
+    if (installed) command += L"Update -Destination \"" + folder.wstring() + L"\"";
+    else command += L"CheckForUpdate";
+    command += L" -Prompt";
+    if (automatic) command += L" -Quiet";
+    if (includePrereleases) command += L" -IncludePrerelease";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(powershell.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, system, &startup, &process)) return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
 }
 
 std::uint64_t nextImport(std::uint64_t previous) {

@@ -1,4 +1,8 @@
 #include "input_dialog.hpp"
+#include "bridge.hpp"
+
+#include <commctrl.h>
+#include <algorithm>
 
 #include <array>
 #include <format>
@@ -12,12 +16,14 @@ constexpr int sourceBase = 100;
 constexpr int saveButton = 120;
 constexpr int cancelButton = 121;
 constexpr int enableBase = 130, thresholdBase = 140;
+constexpr int meterBase = 150, controllerState = 153;
 constexpr std::array outputs{L"A button", L"B button", L"System", L"Joystick click"};
 constexpr std::array sources{L"A button", L"B button", L"System button", L"Joystick click",
                              L"Power button", L"Trigger", L"Grip", L"Trackpad touch", L"Disabled"};
 
 struct Dialog {
     ControllerEdit edit{};
+    const Hand& sample;
     bool live{};
     bool saved{};
     bool closed{};
@@ -25,6 +31,11 @@ struct Dialog {
 struct JointDialog {
     const std::array<Vec3, jointCount>& offsets;
     std::optional<JointEdit> edit;
+    bool closed{};
+};
+struct CurveDialog {
+    const HandCurves& curves;
+    std::optional<CurveEdit> edit;
     bool closed{};
 };
 
@@ -36,12 +47,35 @@ HWND item(HWND window, const wchar_t* type, const wchar_t* label, DWORD style,
     return control;
 }
 
-bool readNumber(HWND window, int field, float& number) {
+template<class Number>
+bool readNumber(HWND window, int field, Number& number) {
     wchar_t value[32]{};
     GetDlgItemTextW(window, field, value, 32);
     std::wistringstream input(value);
     input.imbue(std::locale::classic());
     return (input >> number) && (!(input >> std::ws) || input.eof());
+}
+
+void refreshController(HWND window, const Hand& sample) {
+    const auto time = now();
+    const bool live = sample.linked && sample.lastFrame && time >= sample.lastFrame &&
+        time - sample.lastFrame <= sampleTimeout;
+    const std::array values{sample.trigger, sample.grip, sample.pad};
+    for (std::size_t i = 0; i < values.size(); ++i)
+        SendDlgItemMessageW(window, meterBase + static_cast<int>(i), PBM_SETPOS,
+            live ? static_cast<WPARAM>(100 * std::clamp(values[i], 0.0f, 1.0f)) : 0, 0);
+    std::wstring controls;
+    if (live && sample.controllerRevision) controls = std::format(L"Controller {}.0", sample.controllerRevision);
+    if (!live) controls = L"Glove offline";
+    if (live) for (const auto& [button, label] : std::array{
+         std::pair{Button::a, L"A"}, std::pair{Button::b, L"B"},
+         std::pair{Button::system, L"System"}, std::pair{Button::stick, L"Stick"}}) {
+        if (sample.buttons & bit(button)) {
+            if (!controls.empty()) controls += L"   ";
+            controls += label;
+        }
+    }
+    SetDlgItemTextW(window, controllerState, controls.c_str());
 }
 
 LRESULT CALLBACK handle(HWND window, UINT event, WPARAM wParam, LPARAM lParam) {
@@ -83,9 +117,22 @@ LRESULT CALLBACK handle(HWND window, UINT event, WPARAM wParam, LPARAM lParam) {
                 }
             }
         }
-        item(window, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 140, 368, 95, 28, cancelButton);
-        item(window, L"BUTTON", L"Save", WS_TABSTOP | BS_DEFPUSHBUTTON, 250, 368, 95, 28, saveButton);
+        item(window, L"STATIC", L"", SS_CENTERIMAGE, 20, 359, 324, 22, controllerState);
+        {
+            constexpr std::array names{L"Trigger input", L"Grip input", L"Trackpad input"};
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                const auto y = 387 + static_cast<int>(i) * 25;
+                item(window, L"STATIC", names[i], SS_CENTERIMAGE, 20, y, 112, 18, 0);
+                item(window, PROGRESS_CLASSW, L"", PBS_SMOOTH, 140, y + 1, 205, 16,
+                     meterBase + static_cast<int>(i));
+            }
+        }
+        refreshController(window, dialog->sample);
+        SetTimer(window, 1, 50, nullptr);
+        item(window, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 140, 474, 95, 28, cancelButton);
+        item(window, L"BUTTON", L"Save", WS_TABSTOP | BS_DEFPUSHBUTTON, 250, 474, 95, 28, saveButton);
         return 0;
+    case WM_TIMER: refreshController(window, dialog->sample); return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == saveButton) {
             for (std::size_t row = 0; row < outputs.size(); ++row) {
@@ -112,7 +159,10 @@ LRESULT CALLBACK handle(HWND window, UINT event, WPARAM wParam, LPARAM lParam) {
         }
         if (LOWORD(wParam) == cancelButton) DestroyWindow(window);
         return 0;
-    case WM_NCDESTROY: if (dialog) dialog->closed = true; break;
+    case WM_NCDESTROY:
+        KillTimer(window, 1);
+        if (dialog) dialog->closed = true;
+        break;
     }
     return DefWindowProcW(window, event, wParam, lParam);
 }
@@ -183,6 +233,75 @@ LRESULT CALLBACK jointHandler(HWND window, UINT event, WPARAM wParam, LPARAM lPa
     return DefWindowProcW(window, event, wParam, lParam);
 }
 
+constexpr int curveChoice = 100, firstCurveField = 101;
+constexpr std::array curveNames{
+    L"Thumb distal bend", L"Thumb intermediate bend", L"Thumb proximal bend", L"Thumb splay",
+    L"Index distal bend", L"Index intermediate bend", L"Index proximal bend", L"Index splay",
+    L"Middle distal bend", L"Middle intermediate bend", L"Middle proximal bend", L"Middle splay",
+    L"Ring distal bend", L"Ring intermediate bend", L"Ring proximal bend", L"Ring splay",
+    L"Pinky distal bend", L"Pinky intermediate bend", L"Pinky proximal bend", L"Pinky splay", L"Thumb roll"
+};
+
+void showCurve(HWND window, const CurveDialog& dialog) {
+    const auto channel = static_cast<std::size_t>(SendDlgItemMessageW(window, curveChoice, CB_GETCURSEL, 0, 0));
+    if (channel >= dialog.curves.size()) return;
+    const auto& curve = dialog.curves[channel];
+    const std::array values{curve.min, curve.max, curve.balance, curve.offset};
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto field = firstCurveField + static_cast<int>(i);
+        SetDlgItemTextW(window, field, std::format(L"{:.4f}", values[i]).c_str());
+        EnableWindow(GetDlgItem(window, field), channel != 11 || i == 3);
+    }
+}
+
+LRESULT CALLBACK curveHandler(HWND window, UINT event, WPARAM wParam, LPARAM lParam) {
+    if (event == WM_NCCREATE)
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(
+            reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams));
+    const auto dialog = reinterpret_cast<CurveDialog*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    switch (event) {
+    case WM_CREATE: {
+        item(window, L"STATIC", L"Finger channel", 0, 20, 20, 180, 22, 0);
+        const auto combo = item(window, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+                                20, 45, 324, 252, curveChoice);
+        for (const auto name : curveNames) SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+        SendMessageW(combo, CB_SETCURSEL, 0, 0);
+        constexpr std::array fields{L"Minimum angle (°)", L"Maximum angle (°)", L"Balance (0 to 1)", L"Offset (°)"};
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            const auto x = 20 + static_cast<int>(i % 2) * 168;
+            const auto y = 88 + static_cast<int>(i / 2) * 57;
+            item(window, L"STATIC", fields[i], 0, x, y, 150, 22, 0);
+            item(window, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, x, y + 22, 155, 26,
+                 firstCurveField + static_cast<int>(i));
+        }
+        item(window, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 140, 205, 95, 28, cancelButton);
+        item(window, L"BUTTON", L"Apply", WS_TABSTOP | BS_DEFPUSHBUTTON, 250, 205, 95, 28, saveButton);
+        showCurve(window, *dialog);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == curveChoice && HIWORD(wParam) == CBN_SELCHANGE) showCurve(window, *dialog);
+        if (LOWORD(wParam) == cancelButton) DestroyWindow(window);
+        if (LOWORD(wParam) == saveButton) {
+            CurveEdit edit{static_cast<std::size_t>(SendDlgItemMessageW(window, curveChoice, CB_GETCURSEL, 0, 0))};
+            auto& [min, max, balance, offset] = edit.curve;
+            if (!readNumber(window, firstCurveField, min) || !readNumber(window, firstCurveField + 1, max) ||
+                !readNumber(window, firstCurveField + 2, balance) || !readNumber(window, firstCurveField + 3, offset) ||
+                !validHandCurve(edit.channel, edit.curve)) {
+                MessageBoxW(window, L"Use angles between −180° and 180° in ascending order, "
+                            L"a balance from 0 to 1, and an offset between −45° and 45°.",
+                            L"Hand response", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            dialog->edit = edit;
+            DestroyWindow(window);
+        }
+        return 0;
+    case WM_NCDESTROY: if (dialog) dialog->closed = true; break;
+    }
+    return DefWindowProcW(window, event, wParam, lParam);
+}
+
 void showDialog(HWND owner, const wchar_t* name, const wchar_t* title,
                 WNDPROC procedure, int height, void* state, const bool& closed) {
     WNDCLASSW cls{};
@@ -221,9 +340,11 @@ void showDialog(HWND owner, const wchar_t* name, const wchar_t* title,
 }
 
 std::optional<ControllerEdit> editInputs(HWND owner, const HandSettings& settings, const Hand& hand, bool live) {
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS};
+    InitCommonControlsEx(&controls);
     Dialog dialog{{settings.buttonMap, {settings.triggerEnabled, settings.gripEnabled, settings.padEnabled, settings.thumbEnabled},
-                   hand.buttonRanges}, live};
-    showDialog(owner, className, L"OpenCap controller settings", handle, 444, &dialog, dialog.closed);
+                   hand.buttonRanges}, hand, live};
+    showDialog(owner, className, L"OpenCap controller settings", handle, 548, &dialog, dialog.closed);
     if (dialog.saved) return dialog.edit;
     return std::nullopt;
 }
@@ -231,6 +352,12 @@ std::optional<ControllerEdit> editInputs(HWND owner, const HandSettings& setting
 std::optional<JointEdit> editJoint(HWND owner, const std::array<Vec3, jointCount>& offsets) {
     JointDialog dialog{offsets};
     showDialog(owner, L"OpenCapJointCorrection", L"OpenCap joint correction", jointHandler, 251, &dialog, dialog.closed);
+    return dialog.edit;
+}
+
+std::optional<CurveEdit> editHandCurve(HWND owner, const HandCurves& curves) {
+    CurveDialog dialog{curves};
+    showDialog(owner, L"OpenCapHandResponse", L"OpenCap hand response", curveHandler, 277, &dialog, dialog.closed);
     return dialog.edit;
 }
 }
