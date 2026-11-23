@@ -57,7 +57,9 @@ jobs:
           exit 0
       - name: Verify SteamVR setup and UDCAP restoration
         shell: powershell
-        run: ./tests/steamvr-setup.ps1 -Package ./out/OpenCap
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          ./tests/steamvr-setup.ps1 -Package ./out/OpenCap
       - uses: actions/upload-artifact@v4
         with:
           name: OpenCap-Windows-x64
