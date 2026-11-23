@@ -1,6 +1,6 @@
 #include "hand_view.hpp"
 #include "bridge.hpp"
-#include "vr_skeleton.hpp"
+#include "hand_drawing.hpp"
 
 #include <windowsx.h>
 #include <algorithm>
@@ -11,10 +11,8 @@
 namespace opencap {
 namespace {
 constexpr wchar_t windowClass[] = L"OpenCapHandView";
-constexpr COLORREF background = RGB(17, 27, 40);
-constexpr COLORREF foreground = RGB(234, 243, 248);
-constexpr COLORREF active = RGB(96, 224, 201);
-constexpr COLORREF inactive = RGB(128, 146, 162);
+constexpr COLORREF background = RGB(24, 30, 26);
+constexpr COLORREF foreground = RGB(241, 244, 235);
 constexpr INT_PTR modeButton = 10, resetButton = 11;
 constexpr std::array<const wchar_t*, 5> fingers{L"Thumb", L"Index", L"Middle", L"Ring", L"Pinky"};
 constexpr std::array gradeColors{RGB(255, 144, 137), RGB(232, 197, 116), RGB(171, 224, 141), RGB(102, 205, 155)};
@@ -38,36 +36,6 @@ struct View {
         pitch = std::clamp(pitch + dy * .4f, -80.0f, 80.0f);
         yaw += dx * .4f;
         camera = eulerDegrees({pitch, yaw, 0});
-    }
-
-    POINT project(Vec3 point, int x0, int y0, float scale) const {
-        const auto rotated = rotate(camera, point);
-        return {static_cast<LONG>(x0 + scale * rotated.x), static_cast<LONG>(y0 - scale * rotated.y)};
-    }
-
-    void drawHand(HDC dc, const RECT& size, const Hand& hand, bool live) const {
-        const auto chains = makeHandPreview(side, live ? hand : Hand{});
-        const auto scale = static_cast<float>((std::min)(size.right, size.bottom - 88)) * 3.6f;
-        const auto x0 = size.right / 2;
-        const auto y0 = static_cast<int>((size.bottom + 88) / 2 + .08f * scale);
-        const auto pen = CreatePen(PS_SOLID, 4, live ? active : inactive);
-        const auto fill = CreateSolidBrush(live ? active : inactive);
-        const auto previousPen = SelectObject(dc, pen);
-        const auto previousFill = SelectObject(dc, fill);
-        for (const auto& chain : chains) {
-            auto p = project({}, x0, y0, scale);
-            for (const auto& joint : chain) {
-                const auto next = project(joint, x0, y0, scale);
-                MoveToEx(dc, p.x, p.y, nullptr);
-                LineTo(dc, next.x, next.y);
-                Ellipse(dc, next.x - 3, next.y - 3, next.x + 3, next.y + 3);
-                p = next;
-            }
-        }
-        SelectObject(dc, previousFill);
-        SelectObject(dc, previousPen);
-        DeleteObject(fill);
-        DeleteObject(pen);
     }
 
     void paint(HWND window) const {
@@ -110,7 +78,7 @@ struct View {
                 }
             }
         } else {
-            drawHand(dc, size, hand, live);
+            drawGlovePose(dc, {18, 92, size.right-18, size.bottom-16}, side, hand, live, camera);
         }
         BitBlt(target, 0, 0, size.right, size.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, savedBitmap);
@@ -180,9 +148,11 @@ bool openHandView(HWND owner, unsigned side) {
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.lpszClassName = windowClass;
     if (!RegisterClassW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+    const auto originalDpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED);
     const auto window = CreateWindowExW(0, windowClass, side ? L"OpenCap — Right hand" : L"OpenCap — Left hand",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 680, 530,
             owner, nullptr, instance, reinterpret_cast<void*>(static_cast<UINT_PTR>(side)));
+    SetThreadDpiAwarenessContext(originalDpi);
     if (!window) return false;
     ShowWindow(window, SW_SHOW);
     return true;

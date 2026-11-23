@@ -150,6 +150,41 @@ public:
         return control && (GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE);
     }
 
+    bool toggle(const wchar_t* label) const {
+        const auto control = button(label);
+        DWORD_PTR handled{};
+        return control && SendMessageTimeoutW(control, BM_CLICK, 0, 0, SMTO_ABORTIFHUNG, 1000, &handled);
+    }
+
+    void checkResizing() const {
+        const auto guided = button(L"Guided calibration");
+        const auto viewer = button(L"Orbit view");
+        const auto window = GetParent(guided);
+        const auto style = GetWindowLongPtrW(window, GWL_STYLE);
+        require((style & WS_THICKFRAME) && (style & WS_MAXIMIZEBOX), "Desktop supports resizing and maximizing");
+        const auto resize = [&](int width, int height) {
+            const auto dpi = GetDpiForWindow(window);
+            SetWindowPos(window, nullptr, 0, 0, MulDiv(width,dpi,96), MulDiv(height,dpi,96),
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        };
+        RECT action{}, orbit{}, client{};
+        resize(1040, 690);
+        GetWindowRect(guided, &action);
+        GetWindowRect(viewer, &orbit);
+        require(action.left > orbit.right, "Wide layout places calibration beside the preview");
+        resize(470, 440);
+        GetWindowRect(guided, &action);
+        GetWindowRect(viewer, &orbit);
+        require(action.top > orbit.bottom, "Narrow layout moves calibration below the preview");
+        SendMessageW(window, WM_VSCROLL, SB_BOTTOM, 0);
+        GetWindowRect(guided, &action);
+        MapWindowPoints(HWND_DESKTOP, window, reinterpret_cast<POINT*>(&action), 2);
+        GetClientRect(window, &client);
+        require(action.top >= 0 && action.bottom <= client.bottom && action.right <= client.right,
+                "Scrolling a short window brings calibration into view");
+        resize(1040, 690);
+    }
+
     ~TestDesktop() {
         EnumThreadWindows(process_.dwThreadId, closeWindow, 0);
         if (WaitForSingleObject(process_.hProcess, 2000) == WAIT_TIMEOUT) TerminateProcess(process_.hProcess, 1);
@@ -231,16 +266,20 @@ static void checkDemo(const wchar_t* path, TestOwner* owner = nullptr) {
         return;
     }
 
-    require(app.shows(L"Calibrate both gloves") && !app.shows(L"Pair glove"), "Open on the Gloves page");
-    require(app.click(L"Devices") && app.shows(L"Pair glove") && !app.shows(L"Calibrate both gloves"),
+    require(app.shows(L"Guided calibration") && !app.shows(L"Pair glove"), "Open on the Gloves page");
+    app.checkResizing();
+    require(app.click(L"Devices") && app.shows(L"Pair glove") && !app.shows(L"Guided calibration"),
             "Navigate to pairing and hide calibration controls");
     require(app.click(L"Tracking") && app.shows(L"Apply tracker alignment") && !app.shows(L"Pair glove"),
             "Navigate to tracker settings");
     require(app.click(L"Streaming") && app.shows(L"Apply streaming") && !app.shows(L"Apply tracker alignment"),
             "Navigate to streaming settings");
-    require(app.click(L"Settings") && app.shows(L"Inspect firmware image…") && !app.shows(L"Apply streaming"),
+    require(app.click(L"Settings") && app.shows(L"Inspect firmware image") && !app.shows(L"Apply streaming"),
             "Navigate to maintenance settings");
-    require(app.click(L"Gloves") && app.shows(L"Calibrate both gloves") && app.click(L"Calibrate both gloves"),
+    require(app.shows(L"Automatic hand calibration") && app.toggle(L"Automatic hand calibration") &&
+            waitFor([](const auto& sample) { return !sample.automaticHandCalibration; }),
+            "Turn off automatic hand calibration from Settings");
+    require(app.click(L"Gloves") && app.shows(L"Guided calibration") && app.click(L"Guided calibration"),
             "Return to Gloves and start guided calibration");
     for (unsigned pose = 1; pose <= 3; ++pose) {
         require(waitFor([pose](const auto& sample) {
@@ -264,9 +303,12 @@ static void checkDemo(const wchar_t* path, TestOwner* owner = nullptr) {
         return sample.hands[1].calibrationStep == 4;
     }), "Enter joystick calibration on the right glove");
     require(bus.send({Side::left, Action::guidedCalibration}) && waitFor([](const auto& sample) {
-        return !sample.calibrationGuide.hands && sample.calibrationGuide.result == CalibrationResult::failed &&
-            sample.hands[0].calibrationStep == 0 && sample.hands[1].calibrationStep == 4;
-    }), "A busy glove blocks the whole hand calibration session");
+        return sample.calibrationGuide.hands == 1 && sample.hands[0].calibrationStep == 1 &&
+            sample.hands[1].calibrationStep == 4;
+    }), "Guide the available glove while the other is in joystick calibration");
+    require(bus.send({Side::left, Action::cancelHand}) && waitFor([](const auto& sample) {
+        return !sample.calibrationGuide.hands && !sample.hands[0].calibrationStep && sample.hands[1].calibrationStep == 4;
+    }), "Cancel only the participating glove");
     require(bus.send({Side::right, Action::joystickFinish}) && waitFor([](const auto& sample) {
         return sample.hands[1].calibrationStep == 0;
     }), "Finish joystick calibration before starting both gloves");
@@ -318,8 +360,8 @@ static void checkDemo(const wchar_t* path, TestOwner* owner = nullptr) {
     require(bus.send({Side::left, Action::pairBothStop}) &&
             waitFor([](const auto& sample) { return !sample.hands[0].pairing && !sample.hands[1].pairing; }),
             "Stop pairing for both gloves");
-    require(bus.send({Side::right, Action::channel, 20}) && bus.send({Side::left, Action::channel, 23}) &&
-            waitFor([](const auto& sample) { return sample.hands[0].channel == 23 && sample.hands[1].channel == 40; }),
+    require(bus.send({Side::right, Action::channel, 2}) && bus.send({Side::left, Action::channel, 3}) &&
+            waitFor([](const auto& sample) { return sample.hands[0].channel == 3 && sample.hands[1].channel == 7; }),
             "Apply a free radio channel and reject a channel in use by the other glove");
 }
 

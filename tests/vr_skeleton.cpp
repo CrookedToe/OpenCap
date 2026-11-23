@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 
 using namespace opencap;
@@ -54,13 +55,24 @@ void checkSplay(Side side) {
 
     hand.splay = calibratedSplay(calibration, calibration[2]);
     const auto spread = makeVrHandSkeleton(side, hand);
-    require(hand.splay.gaps == std::array{1.0f,1.0f,1.0f} && near(separation(spread, 7, 22), std::cos(34.0f*3.14159265f/180)),
-            "Spread calibration reaches the bounded fan with positive or negative sensor polarity");
+    const auto cosine = [](float degrees) { return std::cos(degrees * std::numbers::pi_v<float> / 180); };
+    require(hand.splay.gaps == std::array{1.0f,1.0f,1.0f} &&
+            near(separation(spread, 7, 12), cosine(18)) && near(separation(spread, 12, 17), cosine(14)) &&
+            near(separation(spread, 17, 22), cosine(18)) && near(separation(spread, 7, 22), cosine(50)),
+            "Spread calibration reaches the wider fan on each hand with either sensor polarity");
     const auto openPreview = makeHandPreview(side, hand);
     const auto previewSpan = [](const HandPreview& points) { return std::abs(points[1].back().x - points[4].back().x); };
+    auto middleSample = calibration[1];
+    middleSample[7] = 200;
+    hand.splay = calibratedSplay(calibration, middleSample);
+    const auto middleGap = makeVrHandSkeleton(side, hand);
+    require(near(separation(middleGap, 7, 12), 1) && near(separation(middleGap, 12, 17), cosine(7)) &&
+            near(separation(middleGap, 17, 22), 1), "A half-open middle gap leaves neighboring gaps closed");
+
+    hand.splay = calibratedSplay(calibration, calibration[2]);
     hand.splayCurves[0].max = 12.5;
     const auto narrowed = makeVrHandSkeleton(side, hand);
-    require(near(separation(narrowed, 7, 22), std::cos(28.0f*3.14159265f/180)), "Respect a custom splay range");
+    require(near(separation(narrowed, 7, 22), cosine(41)), "Respect a custom splay range");
     auto sample = calibration[1];
     sample[4] = -100; sample[7] = 200; sample[10] = 1000;
     require(calibratedSplay(calibration, sample).gaps == std::array{0.0f,.5f,1.0f}, "Clamp splay beyond the captures");

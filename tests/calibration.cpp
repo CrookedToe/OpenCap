@@ -1,4 +1,6 @@
 #include <CorePref.h>
+#include "calibration_log.hpp"
+#include "model.hpp"
 #include <UdCapV1Core.h>
 #include <nlohmann/json.hpp>
 #include <windows.h>
@@ -68,9 +70,158 @@ void calibrate(UdCapV1Core& core, PortAccessor& transport, const UdCapV1Core::Ca
                                UDCAP_V1_HAND_CALI_TYPE_PROTRACT};
     for (std::size_t i = 0; i < poses.size(); ++i) {
         frame(transport, samples[i]);
-        core.captureCalibrationData(poses[i]);
+        const auto captured = core.captureCalibrationData(poses[i]);
+        require(captured.timeUs > 0 && captured.count == samples[i].size() && captured.values == samples[i],
+                "Capture the exact timestamped raw frame used by the solver");
     }
     core.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+}
+
+void checkLiveRanges() {
+    using namespace std::chrono_literals;
+    using opencap::LiveHandCalibration;
+    LiveHandCalibration live;
+    LiveHandCalibration::Clock::time_point time{};
+    Sample sample{};
+    auto hold = [&](int bend, int spread, int frames) {
+        sample[0] = static_cast<int16_t>(bend);
+        sample[4] = static_cast<int16_t>(spread);
+        for (int i = 0; i < frames; ++i) live.update(sample, time += 10ms);
+    };
+    hold(1500, 900, 100);
+    hold(32000, 32000, 1);
+    hold(1500, 900, 100);
+    for (int i = 0; i < 8; ++i) { hold(1540, 915, 10); hold(1500, 900, 10); }
+    require(live.range() == opencap::SensorRange{}, "A resting hand, jitter and an isolated spike cannot teach full range");
+    hold(2250, 900, 30);
+    hold(1500, 900, 30);
+    time += 2s;
+    hold(2250, 900, 30);
+    hold(1500, 900, 30);
+    require(live.range()[1][0] == 0, "Discard incomplete motion evidence across a frame gap");
+    for (int i = 0; i < 3; ++i) { hold(2250, 900, 30); hold(1500, 900, 30); }
+    require(live.range()[0][0] == 1500 && live.range()[1][0] == 2250 && !live.range()[1][4],
+            "Bend learns independently while splay stays still");
+    for (int i = 0; i < 4; ++i) { hold(1500, 1220, 30); hold(1500, 900, 30); }
+    require(live.range()[0][4] == 900 && live.range()[1][4] == 1220, "Learn splay during later use");
+    hold(1875, 1060, 600);
+    require(live.range()[0][0] == 1500 && live.range()[1][0] == 2250, "A held half-grip keeps its range");
+    auto seed = live.range();
+    std::swap(seed[0][4], seed[1][4]);
+    live.reset(seed);
+    for (int i = 0; i < 5; ++i) { hold(2440, 1310, 60); hold(1690, 990, 60); }
+    require(std::abs(live.range()[0][0] - 1690) < 20 && std::abs(live.range()[1][0] - 2440) < 20 &&
+            live.range()[0][4] == seed[0][4] && live.range()[1][4] == seed[1][4],
+            "Fist cycles adjust bend without moving either splay endpoint");
+    for (int i = 0; i < 12; ++i) { hold(1690, 1310, 40); hold(1690, 990, 40); }
+    require(live.range()[0][4] == 1310 && live.range()[1][4] == 990,
+            "Separate spread and return strokes update a reversed saved gap");
+    live.reset({});
+    auto flex = [&] {
+        for (int step = 0; step < 80; ++step) {
+            const int distance = std::abs(40 - step);
+            hold(1300 + distance * 20, 800 + distance * 2, 1);
+        }
+    };
+    flex(); flex(); flex();
+    require(live.range()[1][0] > 2000 && !live.range()[1][4],
+            "Continuous movement learns bend while a weak splay signal awaits further visits");
+    flex(); flex(); flex();
+    require(live.range()[1][4] == 0, "Unclenching cannot establish a cold-start splay range");
+    hold(1300, 800, 80);
+    for (int i = 0; i < 8; ++i) { hold(1300, 880, 40); hold(1300, 800, 40); }
+    require(live.range()[0][4] == 800 && live.range()[1][4] == 880,
+            "Independent small spread strokes can teach a weak splay sensor");
+}
+
+void checkLiveReceiver(const std::filesystem::path& path) {
+    {
+        auto transport = port();
+        UdCapV1Core core(transport);
+        connect(*transport, glove);
+        core.configureHandCalibration(glove, true);
+        Sample sample{};
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            for (const int bend : {1000, 2000, 1000}) {
+                sample[3] = static_cast<int16_t>(bend);
+                for (int i = 0; i < 8; ++i) frame(*transport, sample);
+            }
+        }
+        const auto range = core.liveHandRange();
+        require(range && (*range)[0][3] == 1000 && (*range)[1][3] == 2000, "Receiver learns without guided poses");
+        core.configureHandCalibration(glove, false);
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool angles = false, skeleton = false;
+        const auto unlisten = core.listen([&](const auto& packet) {
+            std::lock_guard lock(mutex);
+            angles |= packet->commandType == CMD_ANGLE;
+            skeleton |= packet->commandType == CMD_SKELETON_QUATERNION;
+            changed.notify_all();
+        });
+        frame(*transport, sample);
+        {
+            std::unique_lock lock(mutex);
+            const bool ready = changed.wait_for(lock, std::chrono::seconds(2), [&] { return angles && skeleton; });
+            lock.unlock();
+            unlisten();
+            require(ready, "Frozen learned ranges still publish modeled angles and skeleton frames");
+        }
+        core.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+        require(!core.liveHandRange(), "Pause learning during a guided capture");
+        core.tryRestoreHandCalibration();
+        require(core.liveHandRange() == range, "Cancel guided capture back to the live range");
+        require(core.savePref(path.string()), "Save live endpoints without guided captures");
+    }
+    auto transport = port();
+    UdCapV1Core core(transport);
+    connect(*transport, glove);
+    require(core.loadPref(path.string()), "Read a live-only profile");
+    core.configureHandCalibration(glove, false);
+    const auto restored = core.liveHandRange();
+    require(restored && (*restored)[1][3] == 2000 && !core.handCalibrationSamples(),
+            "Restart with learned endpoints and preserve the distinction from raw pose captures");
+    send(*transport, CMD_LINK_STATE, {0});
+    require(!core.liveHandRange(), "Disconnected gloves have no active range");
+    connect(*transport, glove);
+    require(core.liveHandRange() == restored, "A same-glove radio reconnect retains confirmed endpoints");
+    const auto exercise = [&] {
+        Sample sample{};
+        for (int cycle = 0; cycle < 4; ++cycle)
+            for (int bend : {1200, 2200, 1200}) {
+                sample[2] = static_cast<int16_t>(bend);
+                for (int i = 0; i < 8; ++i) frame(*transport, sample);
+            }
+    };
+    exercise();
+    require(core.liveHandRange() == restored, "Movement cannot teach new ranges while automatic calibration is off");
+    core.configureHandCalibration(glove, true);
+    exercise();
+    require(core.liveHandRange().value()[1][2] == 2200, "Re-enabling learns new movement on the connected glove");
+    UdCapV1Core::CalibrationSamples guided{};
+    for (bool automatic : {true, false}) {
+        core.configureHandCalibration(glove, automatic);
+        guided[0].fill(automatic ? 1850 : 1975);
+        guided[1].fill(800);
+        guided[2].fill(1500);
+        calibrate(core, *transport, guided);
+        const auto expected = opencap::sensorRange(guided);
+        require(core.liveHandRange() == expected, "Guided capture replaces all learned ranges in either mode");
+        core.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
+        core.tryRestoreHandCalibration();
+        require(core.liveHandRange() == expected, "Canceling preserves the last completed guide");
+        require(core.savePref(path.string()), "Save the replacement endpoints");
+        auto freshPort = port();
+        UdCapV1Core restarted(freshPort);
+        connect(*freshPort, glove);
+        require(restarted.loadPref(path.string()), "Load the guided profile");
+        restarted.configureHandCalibration(glove, automatic);
+        require(restarted.liveHandRange() == expected, "Restart uses the replacement endpoints");
+    }
+    connect(*transport, spare);
+    require(!core.liveHandRange() && core.loadPref(path.string()), "Glove swap clears live state");
+    core.configureHandCalibration(spare, true);
+    require(core.liveHandRange() == opencap::SensorRange{}, "Another serial cannot inherit learned endpoints");
 }
 
 void checkController(const UdCapV1Core::CalibrationSamples& captures) {
@@ -103,6 +254,9 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
     require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 3, 0, 12, 8, 32},
             "Route legacy haptics to the glove's vibration command");
     require(core.getControllerRevision() == 1, "Report Controller 1.0 from the input frame");
+    core.mcuTriggerClick();
+    require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 2, 0, 4, 5, 20},
+            "Trigger click addresses a single legacy motor for 40 ms");
     core.mcuTestHaptic(false);
     core.mcuTestHaptic(true);
     require(writes[writes.size() - 2] == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 2, 0, 10, 10, 31} &&
@@ -134,6 +288,9 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
     require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 0x98, 3, 140, 0, 125, 0, 125},
             "Encode Controller 2.0 haptics with independent strength, frequency and time");
     require(core.getControllerRevision() == 2, "Report Controller 2.0 from a compact input frame");
+    core.mcuTriggerClick();
+    require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 188, 2, 100, 0, 40, 0, 35},
+            "Trigger click uses the short Controller 2.0 actuator command");
     core.mcuTestHaptic(false);
     core.mcuTestHaptic(true);
     require(writes[writes.size() - 2] == std::vector<std::uint8_t>{85, 170, 1, 0xce, 8, 2, 0, 88, 2, 100, 0, 232, 3, 130} &&
@@ -155,6 +312,37 @@ void checkController(const UdCapV1Core::CalibrationSamples& captures) {
     require(writes.back() == std::vector<std::uint8_t>{85, 170, 1, 4, 4, 2, 0, 10, 10, 31},
             "A linked glove can run the legacy motor test before controller identification");
 }
+
+void checkRecording(const std::filesystem::path& folder) {
+    using namespace opencap;
+    CalibrationLog log;
+    SensorFrame frame{{123, -45, 78}, 3, sensorTimeUs()};
+    SensorRange range{};
+    range[1][0] = 876;
+    CalibrationRecord row{frame.timeUs, "frame", "left", glove, false, 4, frame, range};
+    log.record(row);
+    require(!std::filesystem::exists(folder), "Disabled recording creates no files");
+    log.start(folder);
+    log.record(row);
+    row.event = "fist";
+    row.timeUs += 200;
+    log.record(row);
+    log.stop();
+    require(log.takeError().empty(), "Stop flushes queued samples and poses");
+    const auto file = std::filesystem::directory_iterator(folder)->path();
+    std::ifstream input(file);
+    std::vector<nlohmann::json> rows;
+    std::string line;
+    while (std::getline(input, line)) rows.push_back(nlohmann::json::parse(line));
+    require(rows.size() == 4 && rows.front()["schema"] == 1 && rows.back()["event"] == "recording_stop" &&
+            rows[1]["raw"] == std::vector<int>({123,-45,78}) && rows[1]["range"] == range &&
+            rows[2]["event"] == "fist" && rows[2]["guide_id"] == 4 && rows[2]["serial"] == glove &&
+            rows[2]["automatic"] == false && rows[2]["sample_utc_us"] == rows[1]["utc_us"] &&
+            rows[2]["utc_us"] == row.timeUs, "Recorded pose references the original unpadded sensor frame");
+    input.close();
+    std::filesystem::remove(file);
+    std::filesystem::remove(folder);
+}
 }
 
 int main() {
@@ -165,6 +353,14 @@ int main() {
         ~Cleanup() { std::error_code error; std::filesystem::remove(path, error); }
     } cleanup{path};
     try {
+        opencap::TriggerClick click;
+        require(!click.update(true, true, 1) && !click.update(true, false, 0) && click.update(true, true, 1) &&
+                !click.update(true, true, 1) && !click.update(true, false, .99f) && !click.update(true, true, 1) &&
+                !click.update(true, false, .5f) && click.update(true, true, 1) && !click.update(false, false, 0) &&
+                !click.update(false, true, 1), "Pulse once per pull, with hysteresis and haptics enable gating");
+        checkRecording(path.string() + ".logs");
+        checkLiveRanges();
+        checkLiveReceiver(path);
         UdCapV1Core::CalibrationSamples captures{};
         captures[0][0] = -154;
         captures[1][0] = 200;

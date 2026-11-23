@@ -75,7 +75,15 @@ Preferences loadSettings(const std::filesystem::path& path) {
     input >> std::ws;
     if (version >= 3 && !input.eof()) {
         bool includePrereleases{};
-        if (input >> includePrereleases) settings.includePrereleases = includePrereleases;
+        if (input >> includePrereleases) {
+            settings.includePrereleases = includePrereleases;
+            bool automatic;
+            if (input >> automatic) {
+                settings.automaticHandCalibration = automatic;
+                bool record;
+                if (input >> record) settings.recordCalibration = record;
+            }
+        }
     }
     return settings;
 }
@@ -108,7 +116,8 @@ bool saveSettings(const std::filesystem::path& path, const Preferences& settings
         output << std::quoted(s.address) << ' ' << s.vmcPort << ' ' << s.oscPort << ' ' << settings.hotkey
                << ' ' << std::quoted(s.oscAddress) << ' ' << settings.udcapImport << ' ' << settings.quickStick
                << ' ' << settings.steamLifecycle.value_or(false) << ' ' << settings.steamLifecycle.has_value()
-               << ' ' << settings.includePrereleases << '\n';
+               << ' ' << settings.includePrereleases << ' ' << settings.automaticHandCalibration
+               << ' ' << settings.recordCalibration << '\n';
         output.close();
         if (!output) return false;
     }

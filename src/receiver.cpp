@@ -1,5 +1,7 @@
 #include "receiver.hpp"
 #include "bridge.hpp"
+#include "radio_channel.hpp"
+#include "calibration_log.hpp"
 
 #include <CorePref.h>
 #include <UdCapProbe.h>
@@ -9,6 +11,7 @@
 #include <cfgmgr32.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -232,8 +235,9 @@ std::array<BoneRotation*, jointCount> jointRotations(HandRotation& hand) {
 
 class Device {
 public:
-    explicit Device(std::unique_ptr<SerialPort> port, UdTarget fallback)
-        : port_(std::move(port)), core_(port_->accessor()) {
+    explicit Device(std::unique_ptr<SerialPort> port, UdTarget fallback, bool singleReceiver = false,
+                    CalibrationLog* log = nullptr)
+        : singleReceiver_(singleReceiver), log_(log), logSide_(fallback), port_(std::move(port)), core_(port_->accessor()) {
         sample_.receiver = true;
         core_.setFallbackTarget(fallback);
         unlisten_ = core_.listen([this](const auto& packet) { receive(*packet); });
@@ -243,7 +247,11 @@ public:
         readButtonRanges();
     }
 
-    ~Device() { if (unlisten_) unlisten_(); }
+    ~Device() {
+        if (unlisten_) unlisten_();
+        std::lock_guard lock(mutex_);
+        interruptRecording();
+    }
 
     UdTarget side() const { return core_.getTarget(); }
     const std::wstring& portPath() const { return port_->path(); }
@@ -270,30 +278,74 @@ public:
 
     void expireChannelRequest() {
         const auto time = now();
-        std::lock_guard lock(mutex_);
-        if (channelRequested_ && time - channelRequested_ >= 10000) {
+        {
+            std::lock_guard lock(mutex_);
+            if (!channelRequested_ || time - channelRequested_ < 10000) return;
             channelRequested_ = 0;
             sample_.pendingChannel = -1;
-            copyText(sample_.message, "Receiver did not confirm the channel. Check the channel before retrying.");
+            sample_.channel = -1;
+            sample_.signal = 0;
+            copyText(sample_.message, "Channel change unconfirmed. Reading receiver channel.");
         }
+        try { core_.mcuGetChannel(); } catch (const std::exception& error) { report(error.what()); }
+    }
+
+    bool reserveRadio(RadioChannels& occupied) const {
+        std::lock_guard lock(mutex_);
+        if (sample_.channel >= 0) occupied.set(sample_.channel);
+        if (sample_.pendingChannel >= 0) occupied.set(sample_.pendingChannel);
+        return sample_.channel >= 0 && sample_.pendingChannel < 0 && !selector_.busy() &&
+            !sample_.pairing && !sample_.calibrationStep;
+    }
+
+    void tuneRadio(const RadioChannels& occupied, bool available) {
+        if (!singleReceiver_) return;
+        std::optional<int> next;
+        {
+            std::lock_guard lock(mutex_);
+            next = selector_.update(now(), sample_, signalTime_, traffic_, occupied, available);
+            if (!next) return;
+            beginChannelChange(*next);
+        }
+        try { sendChannel(*next); } catch (const std::exception& error) { report(error.what()); }
     }
 
     void restorePreferences(const std::filesystem::path& directory, const ReceiverPreferences& defaults,
-                            std::uint64_t revision) {
+                            std::uint64_t revision, bool automatic, bool triggerFeedback) {
+        triggerFeedback_.store(triggerFeedback);
+        automaticMode_.store(automatic);
         if (core_.getState() != UD_INIT_STATE_LINKED) return;
         const auto serial = core_.getUDCapSerial();
-        if (serial.empty()) return;
+        if (serial.empty()) {
+            core_.configureHandCalibration(serial, automatic);
+            return;
+        }
         if (serial != loadedSerial_) {
             loadedSerial_ = serial;
             loadedRevision_ = 0;
-            try { core_.loadPref(); readButtonRanges(); readSplayCurves(); }
+            checkpoint_ = {};
+            nextCheckpoint_ = 0;
+            lastCheckpoint_ = 0;
+            canCheckpoint_ = false;
+            try {
+                const bool loaded = core_.loadPref();
+                canCheckpoint_ = loaded || !std::filesystem::exists(profilePath(directory, serial));
+                core_.configureHandCalibration(serial, automatic);
+                checkpoint_ = core_.liveHandRange().value_or(SensorRange{});
+                readButtonRanges();
+                readSplayCurves();
+            }
             catch (const std::exception& error) { report(error.what()); }
         }
+        core_.configureHandCalibration(serial, automatic);
         if (read().calibrationStep != 0) return;
+        if (wasAutomatic_ && !automatic) nextCheckpoint_ = 0;
+        wasAutomatic_ = automatic;
         if (core_.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_NONE && core_.handCalibrationSamples()) {
             try { core_.tryRestoreHandCalibration(); }
             catch (const std::exception& error) { report(error.what()); }
         }
+        if (canCheckpoint_) checkpointLiveRange(directory, serial, !automatic);
         if (loadedRevision_ == revision) return;
         loadedRevision_ = revision;
         if (defaults.empty() || !revision) return;
@@ -316,6 +368,10 @@ public:
         auto stage = previous.calibrationStep;
         auto calibrationResult = previous.calibrationResult;
         const bool handCalibration = isHandCalibration(request.action);
+        const char* event = nullptr;
+        std::string detail;
+        std::optional<SensorFrame> captured;
+        std::optional<SensorRange> startingRange;
         if (handCalibration && request.action != Action::startHand && previous.calibrationId != request.value) return;
         if (request.action == Action::startHand && stage >= 1 && stage <= 3) return;
         try {
@@ -326,29 +382,41 @@ public:
             switch (request.action) {
             case Action::startHand:
                 if (stage == 4) throw std::runtime_error("Finish the joystick calibration first.");
+                if (log_ && log_->active()) startingRange = core_.liveHandRange();
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
                 stage = 1;
                 calibrationResult = CalibrationResult::active;
+                event = "guided_start";
                 break;
             case Action::fist:
                 if (stage == 1) {
-                    capture(UDCAP_V1_HAND_CALI_TYPE_FIST);
+                    captured = capture(UDCAP_V1_HAND_CALI_TYPE_FIST);
+                    event = "fist";
                     stage = 2;
                 }
                 break;
             case Action::together:
                 if (stage == 2) {
-                    capture(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION);
+                    captured = capture(UDCAP_V1_HAND_CALI_TYPE_ADDUCTION);
+                    event = "fingers_together";
                     stage = 3;
                 }
                 break;
             case Action::spread:
                 if (stage == 3) {
-                    capture(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
-                    stage = 0;
+                    captured = capture(UDCAP_V1_HAND_CALI_TYPE_PROTRACT);
+                    logEvent("fingers_spread", request.value, captured);
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_HAND);
-                    save(directory);
-                    calibrationResult = CalibrationResult::saved;
+                    stage = 0;
+                    const auto serial = gloveSerial();
+                    if (serial.empty()) detail = "Glove serial unavailable.";
+                    else {
+                        try { save(directory, serial); }
+                        catch (const std::exception& error) { detail = error.what(); }
+                    }
+                    calibrationResult = detail.empty() ? CalibrationResult::saved : CalibrationResult::sessionOnly;
+                    event = "guided_complete";
+                    captured.reset();
                 }
                 break;
             case Action::cancelHand:
@@ -356,6 +424,7 @@ public:
                     core_.tryRestoreHandCalibration();
                     stage = 0;
                     calibrationResult = CalibrationResult::canceled;
+                    event = "guided_cancel";
                 }
                 break;
             case Action::joystickCenter:
@@ -363,15 +432,20 @@ public:
                 core_.runCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
                 core_.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_CENTER);
                 stage = 4;
+                event = "joystick_center";
                 break;
             case Action::joystickRange:
-                if (stage == 4) core_.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_ZONE);
+                if (stage == 4) {
+                    core_.captureJoystickData(UDCAP_V1_JOYSTICK_CALI_TYPE_ZONE);
+                    event = "joystick_range";
+                }
                 break;
             case Action::joystickFinish:
                 if (stage == 4) {
                     core_.completeCalibration(UDCAP_V1_DEVICE_CALI_TYPE_JOYSTICK);
                     stage = 0;
                     save(directory);
+                    event = "joystick_complete";
                 }
                 break;
             case Action::pairStart: core_.mcuStartPairing(); break;
@@ -434,6 +508,7 @@ public:
             case Action::cycleTracker:
             case Action::autoTracker: break;
             }
+            if (event) logEvent(event, handCalibration ? request.value : 0, captured, detail, startingRange);
             std::lock_guard lock(mutex_);
             sample_.calibrationStep = stage;
             if (handCalibration) {
@@ -441,8 +516,12 @@ public:
                 sample_.calibrationResult = calibrationResult;
             }
             if (request.action == Action::hapticTest) copyText(sample_.message, "Vibration test sent to the glove.");
-            else if (request.action != Action::haptic) copyText(sample_.message, {});
+            else if (request.action != Action::haptic) copyText(sample_.message, detail);
         } catch (const std::exception& error) {
+            if (handCalibration || request.action == Action::joystickCenter || request.action == Action::joystickRange ||
+                request.action == Action::joystickFinish)
+                logEvent(handCalibration ? "guided_failed" : "joystick_failed", handCalibration ? request.value : 0,
+                         {}, error.what());
             if (handCalibration && stage >= 1 && stage <= 3) {
                 try { core_.tryRestoreHandCalibration(); } catch (const std::exception&) {}
                 stage = 0;
@@ -458,15 +537,24 @@ public:
     }
 
 private:
+    void beginChannelChange(int channel) {
+        channelRequested_ = now();
+        sample_.pendingChannel = channel;
+        copyText(sample_.message, "Waiting for receiver to confirm channel change.");
+    }
+
     void changeChannel(std::uint8_t channel) {
         {
             std::lock_guard lock(mutex_);
             if (channelRequested_) throw std::runtime_error("Wait for the current channel change.");
             if (channel == sample_.channel) return;
-            channelRequested_ = now();
-            sample_.pendingChannel = channel;
-            copyText(sample_.message, "Waiting for receiver to confirm channel change.");
+            selector_ = {};
+            beginChannelChange(channel);
         }
+        sendChannel(channel);
+    }
+
+    void sendChannel(int channel) {
         try { core_.mcuSetChannel(channel); }
         catch (...) {
             std::lock_guard lock(mutex_);
@@ -476,12 +564,31 @@ private:
         }
     }
 
-    void capture(UdCapV1HandCaliType pose) {
-        const auto time = now();
+    SensorFrame capture(UdCapV1HandCaliType pose) {
         const auto last = read().lastFrame;
+        const auto time = now();
         if (!last || time < last || time - last > sampleTimeout)
             throw std::runtime_error("Wait for live glove data before capturing the pose.");
-        core_.captureCalibrationData(pose);
+        return core_.captureCalibrationData(pose);
+    }
+
+    static const char* handName(UdTarget side) {
+        return side == UD_TARGET_LEFT_HAND ? "left" : side == UD_TARGET_RIGHT_HAND ? "right" : "unknown";
+    }
+
+    void logEvent(const char* event, int id, std::optional<SensorFrame> frame = {}, std::string detail = {},
+                  std::optional<SensorRange> range = {}) {
+        if (log_ && log_->active())
+            log_->record({sensorTimeUs(), event, handName(side()), gloveSerial(), automaticMode_, id,
+                          frame, range ? range : core_.liveHandRange(), std::move(detail)});
+    }
+
+    void interruptRecording() {
+        if (sample_.calibrationStep && log_ && log_->active()) {
+            const bool joystick = sample_.calibrationStep == 4;
+            log_->record({sensorTimeUs(), joystick ? "joystick_interrupted" : "guided_interrupted",
+                          handName(logSide_), logSerial_, automaticMode_, joystick ? 0 : sample_.calibrationId});
+        }
     }
 
     void readButtonRanges() {
@@ -545,8 +652,35 @@ private:
             throw std::runtime_error("Glove settings were applied but could not be saved.");
     }
 
-    void save(const std::filesystem::path& directory) {
-        const auto serial = core_.getUDCapSerial();
+    void checkpointLiveRange(const std::filesystem::path& directory, const std::string& serial, bool frozen) {
+        const auto time = now();
+        if (time < nextCheckpoint_) return;
+        nextCheckpoint_ = time + 2000;
+        const auto range = core_.liveHandRange();
+        if (!range) return;
+        bool newChannel = false, moved = false;
+        for (std::size_t i = 0; i < (*range)[0].size(); ++i) {
+            const int span = std::abs((*range)[1][i] - (*range)[0][i]);
+            const int previous = std::abs(checkpoint_[1][i] - checkpoint_[0][i]);
+            const int minimum = minimumSensorSpan(i);
+            newChannel |= span >= minimum && previous < minimum;
+            for (std::size_t end = 0; end < range->size(); ++end)
+                moved |= std::abs((*range)[end][i] - checkpoint_[end][i]) >= std::max(16, previous / 20);
+        }
+        if (frozen ? *range == checkpoint_ : !newChannel && (!moved || time < lastCheckpoint_ + 60000)) return;
+        try {
+            save(directory, serial);
+            checkpoint_ = *range;
+            lastCheckpoint_ = time;
+        } catch (const std::exception& error) {
+            nextCheckpoint_ = time + 60000;
+            report(error.what());
+        }
+    }
+
+    void save(const std::filesystem::path& directory) { save(directory, core_.getUDCapSerial()); }
+
+    void save(const std::filesystem::path& directory, const std::string& serial) {
         const auto target = profilePath(directory, serial);
         const auto temporary = directory / (serial + ".opencap-save.tmp");
         const RemoveTemporary cleanup{temporary};
@@ -557,13 +691,13 @@ private:
 
     void receive(const UdCapV1MCUPacket& packet) {
         const auto battery = packet.commandType == CMD_BATTERY ? core_.getBattery() : std::nullopt;
-        const auto signal = packet.commandType == CMD_BATTERY ? core_.getRssiDbm() : std::nullopt;
         const bool calibrated = core_.getHandCalibrationStatus() == UDCAP_V1_HAND_CALI_STAT_COMPLETED;
         const auto captures = packet.commandType == CMD_READY ? core_.handCalibrationSamples() : std::nullopt;
-        std::lock_guard lock(mutex_);
-        sample_.calibrated = calibrated;
+        std::unique_lock lock(mutex_);
         switch (packet.commandType) {
         case CMD_PORT_CONNECTION_STATE: {
+            interruptRecording();
+            triggerClick_ = {};
             const auto ranges = sample_.buttonRanges;
             const auto curves = sample_.splayCurves;
             sample_ = {};
@@ -571,12 +705,21 @@ private:
             sample_.buttonRanges = ranges;
             sample_.splayCurves = curves;
             channelRequested_ = 0;
+            selector_ = {};
+            traffic_ = {};
+            signalTime_ = 0;
             splayCalibration_.reset();
             break;
         }
         case CMD_LINK_STATE:
             sample_.linked = packet.udState == UD_INIT_STATE_LINKED;
             if (!sample_.linked) {
+                interruptRecording();
+                triggerClick_ = {};
+                selector_.interruptMeasurement();
+                traffic_.lastFrame = 0;
+                signalTime_ = 0;
+                sample_.calibrated = false;
                 sample_.lastFrame = 0;
                 sample_.calibrationStep = 0;
                 sample_.calibrationId = 0;
@@ -594,9 +737,18 @@ private:
             break;
         case CMD_DATA: {
             const auto time = now();
+            traffic_.frame(time);
             sample_.linked = true;
-            if (calibrated && splayCalibration_) {
-                const auto next = calibratedSplay(*splayCalibration_, packet.angle);
+            auto range = packet.liveRange;
+            if (!range && calibrated && splayCalibration_) range = sensorRange(*splayCalibration_);
+            if (log_ && log_->active())
+                log_->record({packet.sensorTimeUs, "frame", handName(logSide_), logSerial_, packet.automaticCalibration,
+                              sample_.calibrationStep >= 1 && sample_.calibrationStep <= 3 ? sample_.calibrationId : 0,
+                              SensorFrame{packet.angle, packet.sensorCount, packet.sensorTimeUs}, packet.liveRange});
+            sample_.calibrated = range && (*range)[0] != (*range)[1];
+            if (sample_.calibrated) {
+                sample_.quality = calibrationSpans(*range);
+                const auto next = calibratedSplay(*range, packet.angle);
                 if (!sample_.splay.measured || !sample_.lastFrame) sample_.splay = next;
                 else {
                     const auto weight = std::clamp(static_cast<float>(time - sample_.lastFrame) / 22.0f, 0.0f, 1.0f);
@@ -615,6 +767,15 @@ private:
             break;
         }
         case CMD_SERIAL:
+            interruptRecording();
+            logSerial_ = packet.deviceSerialNum;
+            logSide_ = receiverSide(logSerial_);
+            triggerClick_ = {};
+            selector_ = {};
+            traffic_ = {};
+            signalTime_ = 0;
+            sample_.signal = 0;
+            sample_.calibrated = false;
             sample_.lastFrame = 0;
             sample_.calibrationStep = 0;
             sample_.calibrationId = 0;
@@ -624,6 +785,7 @@ private:
             splayCalibration_.reset();
             break;
         case CMD_READY:
+            sample_.calibrated = calibrated;
             splayCalibration_ = captures;
             sample_.splay = {};
             sample_.quality = captures ? calibrationSpans(*captures) : CalibrationSpans{};
@@ -631,7 +793,12 @@ private:
         case CMD_FW_VERSION: copyText(sample_.firmware, packet.fwVersion); break;
         case CMD_GET_CHANNEL:
             if (packet.channel > 100) break;
-            if (sample_.channel != packet.channel) sample_.signal = 0;
+            if (sample_.channel != packet.channel) {
+                sample_.signal = 0;
+                signalTime_ = 0;
+                selector_.interruptMeasurement();
+                traffic_.lastFrame = 0;
+            }
             sample_.channel = packet.channel;
             if (packet.channel == sample_.pendingChannel) {
                 channelRequested_ = 0;
@@ -651,7 +818,10 @@ private:
         case CMD_PAIRING_BOTH: sample_.pairing = packet.pairing; break;
         case CMD_BATTERY:
             if (battery) sample_.battery = unit(battery->first / 5.0f);
-            if (signal && sample_.pendingChannel < 0) sample_.signal = -std::abs(*signal);
+            if (sample_.pendingChannel < 0) {
+                sample_.signal = -std::abs(packet.rssiDbm);
+                signalTime_ = now();
+            }
             break;
         case CMD_INPUT_JOYSTICK:
             sample_.stickX = axis(packet.joystickData.joyX);
@@ -677,6 +847,11 @@ private:
             sample_.trigger = unit(b.trigger);
             sample_.grip = unit(b.grip);
             sample_.pad = unit(b.trackpad);
+            if (triggerClick_.update(triggerFeedback_.load() && sample_.linked && !sample_.calibrationStep,
+                                     b.btnTrigger, sample_.trigger)) {
+                lock.unlock();
+                try { core_.mcuTriggerClick(); } catch (const std::exception& error) { report(error.what()); }
+            }
             break;
         }
         case CMD_SKELETON_QUATERNION: {
@@ -707,8 +882,23 @@ private:
     std::array<Vec3, jointCount> frameJointOffsets_{};
     Millis fpsStart_{};
     Millis channelRequested_{};
+    const bool singleReceiver_;
+    CalibrationLog* log_;
+    UdTarget logSide_;
+    std::string logSerial_;
+    std::atomic<bool> triggerFeedback_{};
+    std::atomic<bool> automaticMode_{true};
+    TriggerClick triggerClick_;
+
+    RadioSelector selector_;
+    RadioTraffic traffic_;
+    Millis signalTime_{};
     int frames_{};
     std::string loadedSerial_;
+    SensorRange checkpoint_{};
+    Millis nextCheckpoint_{}, lastCheckpoint_{};
+    bool canCheckpoint_{};
+    bool wasAutomatic_{true};
     std::optional<CalibrationSamples> splayCalibration_;
     std::uint64_t loadedRevision_{};
     std::unique_ptr<SerialPort> port_;
@@ -791,8 +981,9 @@ struct Receiver::Impl {
     };
 
     Impl(const std::filesystem::path& preferences, std::array<ReceiverPreferences, handCount> hands,
-         std::uint64_t revision)
-        : preferences(preferences), defaults(std::make_shared<Defaults>(Defaults{std::move(hands), revision})) {
+         std::uint64_t revision, bool automatic, CalibrationLog& recording)
+        : preferences(preferences), defaults(std::make_shared<Defaults>(Defaults{std::move(hands), revision})),
+          automaticHandCalibration(automatic), log(recording) {
         try { CorePref::getInstance().setDefaultPrefPath(preferences.string()); }
         catch (const std::exception&) {}
         worker = std::jthread([this](std::stop_token stop) { loop(stop); });
@@ -829,8 +1020,10 @@ struct Receiver::Impl {
             try {
                 auto serial = std::make_unique<SerialPort>(port);
                 UdCapProbe probe(serial->accessor());
-                if (probe.probe() == UDCAP_PROBE_FAILURE) continue;
-                auto device = std::make_shared<Device>(std::move(serial), receiverSide(probe.getUDCapSerial()));
+                const auto type = probe.probe();
+                if (type == UDCAP_PROBE_FAILURE) continue;
+                auto device = std::make_shared<Device>(std::move(serial), receiverSide(probe.getUDCapSerial()),
+                                                       type == UDCAP_PROBE_HAND_V1, &log);
                 std::lock_guard lock(deviceMutex);
                 devices.emplace(port, std::move(device));
             } catch (const std::exception&) {
@@ -855,18 +1048,28 @@ struct Receiver::Impl {
                 currentDefaults = defaults;
             }
             const auto devicesNow = members();
+            const bool automatic = automaticHandCalibration.load();
             for (const auto& device : devicesNow) {
                 device->expireChannelRequest();
                 const auto side = device->side();
                 if (side == UD_TARGET_UNKNOWN) continue;
                 const auto index = side == UD_TARGET_LEFT_HAND ? 0u : 1u;
                 device->restorePreferences(preferences, currentDefaults->hands[index],
-                                           currentDefaults->revision);
+                                           currentDefaults->revision, automatic, (triggerFeedback.load() & (1u << index)) != 0);
             }
             for (const auto& command : pending) {
                 if (stop.stop_requested()) break;
                 const auto side = command.side == Side::left ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;
                 if (const auto device = selectDevice(devicesNow, side)) device->command(command, preferences);
+            }
+            for (const auto& device : devicesNow) {
+                if (stop.stop_requested() || !pending.empty()) break;
+                RadioChannels occupied;
+                bool available = true;
+                for (const auto& peer : devicesNow) {
+                    if (peer != device && !peer->reserveRadio(occupied)) available = false;
+                }
+                device->tuneRadio(occupied, available);
             }
         }
     }
@@ -878,13 +1081,27 @@ struct Receiver::Impl {
     std::deque<Command> commands;
     std::filesystem::path preferences;
     std::shared_ptr<const Defaults> defaults;
+    std::atomic<bool> automaticHandCalibration;
+    std::atomic<unsigned> triggerFeedback{};
+    CalibrationLog& log;
     std::jthread worker;
 };
 
 Receiver::Receiver(const std::filesystem::path& preferences, std::array<ReceiverPreferences, handCount> defaults,
-                   std::uint64_t importRevision)
-    : impl_(std::make_unique<Impl>(preferences, std::move(defaults), importRevision)) {}
+                   std::uint64_t importRevision, bool automaticHandCalibration, CalibrationLog& log)
+    : impl_(std::make_unique<Impl>(preferences, std::move(defaults), importRevision, automaticHandCalibration, log)) {}
 Receiver::~Receiver() = default;
+
+void Receiver::setAutomaticHandCalibration(bool enabled) {
+    impl_->automaticHandCalibration.store(enabled);
+}
+
+void Receiver::setTriggerFeedback(const std::array<HandSettings, handCount>& hands) {
+    unsigned enabled = 0;
+    for (unsigned i = 0; i < handCount; ++i)
+        if (hands[i].haptics && hands[i].triggerEnabled && !hands[i].skeletonOnly) enabled |= 1u << i;
+    impl_->triggerFeedback.store(enabled);
+}
 
 std::optional<CalibrationSamples> Receiver::calibration(Side side) const {
     const auto target = side == Side::left ? UD_TARGET_LEFT_HAND : UD_TARGET_RIGHT_HAND;

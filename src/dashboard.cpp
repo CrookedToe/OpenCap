@@ -20,14 +20,14 @@ namespace {
 using namespace opencap;
 constexpr int width = 1120, height = 612;
 constexpr char key[] = "opencap.dashboard";
-constexpr COLORREF background = RGB(13, 21, 31);
-constexpr COLORREF surface = RGB(24, 37, 52);
-constexpr COLORREF border = RGB(44, 63, 80);
-constexpr COLORREF foreground = RGB(244, 249, 251);
-constexpr COLORREF muted = RGB(169, 187, 201);
-constexpr COLORREF accent = RGB(103, 229, 204);
-constexpr COLORREF accentInk = RGB(10, 35, 35);
-constexpr COLORREF warning = RGB(255, 198, 126);
+constexpr COLORREF background = RGB(24, 30, 26);
+constexpr COLORREF surface = RGB(33, 41, 35);
+constexpr COLORREF border = RGB(65, 77, 67);
+constexpr COLORREF foreground = RGB(241, 244, 235);
+constexpr COLORREF muted = RGB(183, 194, 182);
+constexpr COLORREF accent = RGB(170, 220, 184);
+constexpr COLORREF accentInk = RGB(24, 48, 32);
+constexpr COLORREF warning = RGB(245, 195, 135);
 constexpr Millis commandWait = 1500;
 
 constexpr RECT desktopButton{868, 35, 1080, 93};
@@ -104,15 +104,6 @@ public:
         FillRect(dc_, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     }
 
-    void rounded(RECT area, int radius, COLORREF color) {
-        const auto lastPen = SelectObject(dc_, GetStockObject(NULL_PEN));
-        const auto lastBrush = SelectObject(dc_, GetStockObject(DC_BRUSH));
-        SetDCBrushColor(dc_, color);
-        RoundRect(dc_, area.left, area.top, area.right, area.bottom, radius, radius);
-        SelectObject(dc_, lastBrush);
-        SelectObject(dc_, lastPen);
-    }
-
     void text(RECT area, std::wstring_view value, Font style, COLORREF color = foreground, UINT align = DT_LEFT) {
         const auto previous = SelectObject(dc_, fonts_[static_cast<std::size_t>(style)]);
         SetTextColor(dc_, color);
@@ -124,9 +115,9 @@ public:
     void button(RECT area, std::wstring_view value, bool enabled, ButtonStyle style, POINT cursor) {
         const bool hover = enabled && PtInRect(&area, cursor);
         const bool primary = enabled && style == ButtonStyle::primary;
-        const auto fill = primary ? (hover ? RGB(145, 246, 223) : accent)
-            : hover ? RGB(54, 78, 96) : enabled ? border : RGB(31, 46, 61);
-        rounded(area, 16, fill);
+        const auto fill = primary ? (hover ? RGB(198, 239, 205) : accent)
+            : hover ? RGB(81, 97, 84) : enabled ? border : RGB(48, 57, 49);
+        rect(area, fill);
         InflateRect(&area, -10, 0);
         text(area, value, Font::body, primary ? accentInk : enabled ? foreground : muted, DT_CENTER);
     }
@@ -244,7 +235,7 @@ struct DashboardState {
     bool desktop() const { return desktopAvailable(snapshot, time); }
     bool live(std::size_t hand) const { return isLive(snapshot, static_cast<Side>(hand), time); }
     bool guiding() const { return desktop() && snapshot.calibrationGuide.hands; }
-    bool canCalibrateBoth() const { return !starting && handCalibrationReady(snapshot, time); }
+    bool canCalibrate() const { return !starting && handsReadyForCalibration(snapshot, time); }
 };
 
 enum class DashboardAction { none, desktop, calibrate, cancel };
@@ -252,7 +243,7 @@ enum class DashboardAction { none, desktop, calibrate, cancel };
 DashboardAction actionAt(const DashboardState& state, POINT point) {
     if (PtInRect(&desktopButton, point)) return DashboardAction::desktop;
     if (state.guiding() && PtInRect(&cancelButton, point)) return DashboardAction::cancel;
-    if (state.canCalibrateBoth() && PtInRect(&bothButton, point)) return DashboardAction::calibrate;
+    if (state.canCalibrate() && PtInRect(&bothButton, point)) return DashboardAction::calibrate;
     return DashboardAction::none;
 }
 
@@ -265,10 +256,9 @@ void drawGlove(Canvas& canvas, const DashboardState& state, std::size_t index) {
     const bool live = state.live(index);
     const std::wstring_view linkLabel = live ? L"Connected" : state.desktop() && hand.receiver ? L"Glove offline" : L"No receiver";
     const auto linkColor = live ? accent : muted;
-    canvas.rounded(card, 24, surface);
+    canvas.rect(card, surface);
     canvas.text({x, 147, x + 250, 194}, handNames[index], Font::heading);
-    canvas.rounded({right - 152, 153, right, 190}, 30, live ? RGB(19, 66, 62) : border);
-    canvas.text({right - 150, 153, right - 2, 190}, linkLabel, Font::label, linkColor, DT_CENTER);
+    canvas.text({right - 195, 153, right, 190}, linkLabel, Font::label, linkColor, DT_RIGHT);
     canvas.rect({x, 202, right, 204}, border);
 
     const auto middle = x + 228;
@@ -285,13 +275,14 @@ void drawGlove(Canvas& canvas, const DashboardState& state, std::size_t index) {
         : live && trackingCurrent(state.tracking, state.time) ? L"Waiting for tracker" : L"Tracking offline";
     const auto calibration = state.guiding() && (state.snapshot.calibrationGuide.hands & (1u << index)) ? L"Calibrating"
         : live && hand.calibrationStep == 4 ? L"Joystick setup active"
-        : live && hand.calibrated ? L"Calibrated" : live ? L"Calibration needed" : L"";
+        : live && !state.snapshot.automaticHandCalibration ? (hand.calibrated ? L"Fixed calibration" : L"Uncalibrated")
+        : live && hand.calibrated ? L"Live calibration" : live ? L"Learning movement" : L"";
     canvas.text({x, 295, middle + 8, 325}, tracker, Font::label, tracked ? accent : muted);
     canvas.text({middle + 16, 295, right, 325}, calibration, Font::label, live && !hand.calibrated ? warning : muted);
 }
 
 void drawCalibration(Canvas& canvas, const DashboardState& state, POINT cursor) {
-    canvas.rounded(calibrationCard, 24, surface);
+    canvas.rect(calibrationCard, surface);
     const auto& guide = state.snapshot.calibrationGuide;
     if (!state.guiding()) {
         canvas.text({64, 399, 766, 445}, L"Hand calibration", Font::heading);
@@ -300,18 +291,19 @@ void drawCalibration(Canvas& canvas, const DashboardState& state, POINT cursor) 
             if (state.starting) message = L"Starting calibration…";
             else if (!state.desktop()) message = L"Open the desktop app to connect your gloves.";
             else if (guide.message[0]) message = guide.message.data();
-            else if (!state.live(0) || !state.live(1)) message = L"Connect both gloves to start calibration.";
-            else if (!state.canCalibrateBoth()) message = L"Finish joystick calibration in the desktop app first.";
-            else message = L"Fist  ·  Fingers together  ·  Fingers spread";
+            else if (!state.snapshot.automaticHandCalibration) message = L"Automatic hand calibration is off.";
+            else if (!state.live(0) && !state.live(1)) message = L"Connect a glove to start live calibration.";
+            else message = L"Open, close and spread your fingers to update their ranges.";
         }
         const auto color = !state.notice.empty() || (state.desktop() && guide.result == CalibrationResult::failed && !state.starting)
             ? warning : state.desktop() && guide.result == CalibrationResult::saved && !state.starting ? accent : muted;
         canvas.text({64, 485, 1056, 545}, message, Font::body, color);
-        canvas.button(bothButton, L"Calibrate gloves", state.canCalibrateBoth(), ButtonStyle::primary, cursor);
+        canvas.button(bothButton, L"Guided calibration", state.canCalibrate(), ButtonStyle::primary, cursor);
         return;
     }
 
-    canvas.text({64, 397, 850, 451}, L"Calibrating both gloves", Font::heading);
+    canvas.text({64, 397, 850, 451}, guide.hands == 1 ? L"Calibrating left glove" :
+                guide.hands == 2 ? L"Calibrating right glove" : L"Calibrating both gloves", Font::heading);
     canvas.button(cancelButton, L"Cancel", true, ButtonStyle::secondary, cursor);
 
     const auto remaining = guide.captureAt > state.time ? (std::min)(guide.captureAt - state.time, calibrationCountdown) : 0;
@@ -329,10 +321,10 @@ void drawCalibration(Canvas& canvas, const DashboardState& state, POINT cursor) 
         const bool current = phase == guide.phase;
         const bool captured = phase < guide.phase;
         const RECT track{left, 510, left + 324, 518};
-        canvas.rounded(track, 8, border);
+        canvas.rect(track, border);
         auto fill = track;
         if (current && guide.captureAt) fill.right -= static_cast<LONG>(324 * remaining / calibrationCountdown);
-        if (captured || (current && guide.captureAt && fill.right > fill.left)) canvas.rounded(fill, 8, accent);
+        if (captured || (current && guide.captureAt && fill.right > fill.left)) canvas.rect(fill, accent);
         canvas.text({left, 526, track.right, 555}, stepLabels[step], Font::label, current || captured ? accent : muted);
     }
     if (!state.notice.empty())
@@ -341,9 +333,7 @@ void drawCalibration(Canvas& canvas, const DashboardState& state, POINT cursor) 
 
 void drawDashboard(Canvas& canvas, const DashboardState& state, POINT cursor) {
     canvas.rect({0, 0, width, height}, background);
-    canvas.rounded({40, 37, 98, 95}, 18, accent);
-    canvas.text({40, 37, 98, 95}, L"O", Font::heading, accentInk, DT_CENTER);
-    canvas.text({115, 30, 755, 100}, L"OpenCap", Font::title);
+    canvas.text({40, 30, 755, 100}, L"OpenCap", Font::title);
     canvas.button(desktopButton, L"Open desktop", true, ButtonStyle::secondary, cursor);
     for (std::size_t index = 0; index < handCount; ++index) drawGlove(canvas, state, index);
     drawCalibration(canvas, state, cursor);

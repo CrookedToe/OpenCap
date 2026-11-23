@@ -6,11 +6,13 @@
 #include "stream.hpp"
 #include "udcap_preferences.hpp"
 #ifdef OPENCAP_RECEIVER
+#include "calibration_log.hpp"
 #include "receiver.hpp"
 #endif
 
 #include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <sapi.h>
 #include <algorithm>
@@ -34,17 +36,9 @@ using namespace opencap;
 
 constexpr UINT_PTR tickTimer = 1;
 constexpr Millis captureTimeout = 5000;
-enum Control {
-    leftHand = 100, rightHand, nextPose, cancelPose, centerStick, finishStick, pair,
-    stopPair, pairBoth, channelValue, setChannel, vibrate, useHand, useJoystick, useHaptics,
-    trackerNum, posX, posY, posZ, rotX, rotY, rotZ, applyPose, udpIp, vmcPort, oscPort,
-    applyStream, saveCsv, dashboard, globalHotkey, handView, inputMapping, preferOpenCap, jointAdjustment,
-    oscIp, importUdcap, quickJoystick, trackingPlan, useTrackingPlan, inspectImage, steamStartup, saveCalibration,
-    checkUpdates, includeBetas, vibrateSecond, firmwareUpdates, handResponse,
-    glovesPage, devicesPage, trackingPage, streamingPage, settingsPage
-};
 
-constexpr std::array pageNames{L"Gloves", L"Devices", L"Tracking", L"Streaming", L"Settings"};
+
+
 
 constexpr std::array captureActions{Action::fist, Action::together, Action::spread};
 class Voice {
@@ -74,6 +68,7 @@ public:
           prefs_(loadSettings(folder_)), bus_(session), voice_(!isolated), steamOverlay_(steamOverlay) {
         if (!bus_.reset()) throw std::runtime_error("Could not initialize the OpenCap session.");
         snapshot_.demo = demo_;
+        snapshot_.automaticHandCalibration = prefs_.automaticHandCalibration;
         UdcapPreferences vendor;
         if (!demo_ && !folder_.empty()) vendor = readUdcapPreferences(findUdcapSources(folder_.parent_path()));
         const bool firstImport = vendor.found && !prefs_.udcapImport;
@@ -90,8 +85,10 @@ public:
         snapshot_.settings = prefs_.hands;
 #ifdef OPENCAP_RECEIVER
         snapshot_.receiverSupported = true;
+        if (!demo_ && prefs_.recordCalibration) configureRecording(true);
         if (!demo_ && !folder_.empty())
-            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver), prefs_.udcapImport);
+            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver),
+                                                   prefs_.udcapImport, prefs_.automaticHandCalibration, calibrationLog_);
 #endif
     }
 
@@ -100,7 +97,7 @@ public:
         snapshot_.hands = {};
         bus_.publish(snapshot_);
         if (font_) DeleteObject(font_);
-        if (title_) DeleteObject(title_);
+        if (controlFont_) DeleteObject(controlFont_);
         if (brush_) DeleteObject(brush_);
         if (section_) DeleteObject(section_);
     }
@@ -112,17 +109,24 @@ public:
         cls.lpfnWndProc = dispatch;
         cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         if (!RegisterClassW(&cls)) return 1;
-        constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-        RECT area{0, 0, desktopWidth, desktopHeight};
-        AdjustWindowRect(&area, style, FALSE);
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        constexpr DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+        const UINT dpi = GetDpiForSystem();
+        RECT area{0, 0, MulDiv(1060, dpi, 96), MulDiv(690, dpi, 96)};
+        AdjustWindowRectExForDpi(&area, style, FALSE, 0, dpi);
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
         window_ = CreateWindowW(cls.lpszClassName, L"OpenCap", style, CW_USEDEFAULT, CW_USEDEFAULT,
-            area.right - area.left, area.bottom - area.top, nullptr, nullptr, instance, this);
+            std::min(area.right-area.left, work.right-work.left), std::min(area.bottom-area.top, work.bottom-work.top),
+            nullptr, nullptr, instance, this);
         if (!window_) return 1;
         ShowWindow(window_, view);
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_F1) startQuick();
-            else if (!IsDialogMessageW(window_, &msg)) {
+            else if (IsDialogMessageW(window_, &msg)) {
+                if (msg.message == WM_KEYDOWN) revealFocus();
+            } else {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -144,6 +148,56 @@ private:
     LRESULT event(UINT message, WPARAM wParam, LPARAM lParam) {
         switch (message) {
         case WM_CREATE: create(); return 0;
+        case WM_SIZE:
+            if (wParam != SIZE_MINIMIZED && controlFont_) relayout();
+            return 0;
+        case WM_GETMINMAXINFO: {
+            const auto dpi = GetDpiForWindow(window_);
+            RECT min{0, 0, MulDiv(410, dpi, 96), MulDiv(215, dpi, 96)};
+            AdjustWindowRectExForDpi(&min, WS_OVERLAPPEDWINDOW | WS_VSCROLL, FALSE, 0, dpi);
+            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {min.right-min.left, min.bottom-min.top};
+            return 0;
+        }
+        case WM_DPICHANGED: {
+            dpi_ = HIWORD(wParam);
+            updateControlFont();
+            const auto& box = *reinterpret_cast<RECT*>(lParam);
+            SetWindowPos(window_, nullptr, box.left, box.top, box.right-box.left, box.bottom-box.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            relayout();
+            return 0;
+        }
+        case WM_VSCROLL: {
+            SCROLLINFO info{sizeof(info), SIF_ALL};
+            GetScrollInfo(window_, SB_VERT, &info);
+            int target = scroll_;
+            switch (LOWORD(wParam)) {
+            case SB_TOP: target = 0; break;
+            case SB_BOTTOM: target = info.nMax; break;
+            case SB_LINEDOWN: target += 32; break;
+            case SB_LINEUP: target -= 32; break;
+            case SB_PAGEDOWN: target += static_cast<int>(info.nPage); break;
+            case SB_PAGEUP: target -= static_cast<int>(info.nPage); break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: target = info.nTrackPos; break;
+            default: return 0;
+            }
+            scrollTo(target);
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            UINT lines = 3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            wheelDelta_ += GET_WHEEL_DELTA_WPARAM(wParam);
+            const int steps = wheelDelta_ / WHEEL_DELTA;
+            wheelDelta_ %= WHEEL_DELTA;
+            scrollTo(scroll_ - steps * (lines == WHEEL_PAGESCROLL ? clientHeight_ : static_cast<int>(lines) * 16));
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            SetBkColor(reinterpret_cast<HDC>(wParam), desktopBackground);
+            SetTextColor(reinterpret_cast<HDC>(wParam), RGB(27,35,46));
+            return reinterpret_cast<LRESULT>(brush_);
         case WM_COMMAND:
             if (LOWORD(wParam) == trackerNum && HIWORD(wParam) == CBN_DROPDOWN) listTrackers();
             else if (HIWORD(wParam) == BN_CLICKED) click(LOWORD(wParam));
@@ -161,19 +215,40 @@ private:
             return TRUE;
         case WM_HOTKEY: if (wParam == 1) startQuick(); return 0;
         case WM_ERASEBKGND: return 1;
-        case WM_DRAWITEM:
+        case WM_NOTIFY: {
+            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header->code != NM_CUSTOMDRAW || (header->idFrom != leftHand && header->idFrom != rightHand)) break;
+            const auto& draw = *reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
+            if (draw.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+            DRAWITEMSTRUCT item{};
+            item.hwndItem = header->hwndFrom;
+            item.hDC = draw.hdc;
+            item.rcItem = draw.rc;
+            if (draw.uItemState & CDIS_SELECTED) item.itemState |= ODS_SELECTED;
+            if (draw.uItemState & CDIS_FOCUS) item.itemState |= ODS_FOCUS;
+            paintDesktopButton(item, header->idFrom == (side_ ? rightHand : leftHand)
+                ? DesktopButton::selectedHand : DesktopButton::standard);
+            return CDRF_SKIPDEFAULT;
+        }
+        case WM_DRAWITEM: {
+            const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (item.CtlType != ODT_BUTTON) break;
             if (wParam >= glovesPage && wParam <= settingsPage) {
-                paintDesktopTab(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam),
-                                wParam - glovesPage == static_cast<unsigned>(page_));
-                return TRUE;
+                const bool selected = wParam - glovesPage == static_cast<unsigned>(page_);
+                paintDesktopButton(item, selected ? DesktopButton::selectedPage : DesktopButton::navigation);
+            } else {
+                const bool adjustment = wParam == inputMapping || wParam == jointAdjustment || wParam == handResponse;
+                paintDesktopButton(item, adjustment ? DesktopButton::adjustment
+                    : wParam == handView ? DesktopButton::viewport : DesktopButton::standard);
             }
-            break;
+            return TRUE;
+        }
         case WM_CLOSE:
 #ifdef OPENCAP_RECEIVER
             if (nativeUpdate_.valid()) return 0;
 #endif
             return DefWindowProcW(window_, message, wParam, lParam);
-        case WM_PAINT: paintDesktop(window_, brush_, font_, title_, section_, snapshot_, tracking_, side_, page_, status_); return 0;
+        case WM_PAINT: paintDesktop(window_, layout_, scroll_, dpi_, font_, section_, snapshot_, tracking_, side_, page_, status_); return 0;
         case WM_DESTROY:
             UnregisterHotKey(window_, 1);
             KillTimer(window_, tickTimer);
@@ -185,95 +260,101 @@ private:
         return DefWindowProcW(window_, message, wParam, lParam);
     }
 
-    HWND item(const wchar_t* type, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
+    HWND item(const wchar_t* type, const wchar_t* text, DWORD style, int id) {
         const auto control = CreateWindowExW(style & WS_BORDER ? WS_EX_CLIENTEDGE : 0, type, text,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | (style & ~WS_BORDER), x, y, w, h, window_,
+            WS_CHILD | WS_TABSTOP | (style & ~WS_BORDER), 0, 0, 1, 1, window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-        if (control && creatingPage_) pageControls_[static_cast<std::size_t>(*creatingPage_)].push_back(control);
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), FALSE);
         return control;
     }
 
-    void button(int id, const wchar_t* caption, int x, int y, int w, DWORD extra = BS_PUSHBUTTON) {
-        item(L"BUTTON", caption, extra, x, y, w, 29, id);
+    void button(int id, const wchar_t* caption, DWORD extra = BS_OWNERDRAW) {
+        item(L"BUTTON", caption, extra, id);
     }
 
-    void edit(int id, int x, int y, int w) {
-        item(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, x, y, w, 26, id);
+    void edit(int id) { item(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, id); }
+
+    static HFONT makeFont(int height, int weight) {
+        return CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    }
+
+    void updateControlFont() {
+        const auto previous = controlFont_;
+        controlFont_ = makeFont(MulDiv(15, dpi_, 96), FW_NORMAL);
+        for (auto child = GetWindow(window_, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), TRUE);
+        if (previous) DeleteObject(previous);
     }
 
     void create() {
-        font_ = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        title_ = CreateFontW(-30, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        section_ = CreateFontW(-21, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        dpi_ = GetDpiForWindow(window_);
+        font_ = makeFont(15, FW_NORMAL);
+        section_ = makeFont(19, FW_SEMIBOLD);
+        updateControlFont();
         brush_ = CreateSolidBrush(desktopBackground);
-        button(leftHand, L"Left glove", 50, 122, 120, BS_AUTORADIOBUTTON | WS_GROUP);
-        button(rightHand, L"Right glove", 480, 122, 120, BS_AUTORADIOBUTTON);
-        button(dashboard, L"Open in SteamVR", 713, 26, 177, WS_GROUP | BS_PUSHBUTTON);
-        for (std::size_t i = 0; i < pageNames.size(); ++i)
-            item(L"BUTTON", pageNames[i], BS_OWNERDRAW, 30 + 173 * static_cast<int>(i), 174, 168, 38, glovesPage + static_cast<int>(i));
 
-        creatingPage_ = DesktopPage::gloves;
-        button(handView, L"Open hand viewer", 50, 480, 160);
-        button(saveCsv, L"Export hand sample", 219, 480, 170);
-        button(nextPose, L"Calibrate both gloves", 472, 298, 245, WS_DISABLED);
-        button(cancelPose, L"Cancel", 726, 298, 143);
-        button(centerStick, L"Set joystick center", 472, 371, 194);
-        button(finishStick, L"Finish joystick range", 675, 371, 194);
-        button(inputMapping, L"Controller inputs…", 472, 462, 137);
-        button(handResponse, L"Hand response…", 617, 462, 123);
-        button(jointAdjustment, L"Joint correction…", 748, 462, 121);
-        if (!demo_) button(saveCalibration, L"Export calibration", 472, 498, 192);
+        for (std::size_t i = 0; i < desktopPages.size(); ++i)
+            button(glovesPage + static_cast<int>(i), desktopPages[i]);
+        button(dashboard, L"Open in SteamVR", BS_OWNERDRAW | WS_GROUP);
+        button(leftHand, L"Left glove", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP);
+        button(rightHand, L"Right glove", BS_AUTORADIOBUTTON | BS_PUSHLIKE);
+        button(handView, L"Orbit view", BS_OWNERDRAW | WS_GROUP);
+        button(exportMenu, L"Export…");
+        button(nextPose, L"Guided calibration", BS_OWNERDRAW | WS_DISABLED);
+        button(cancelPose, L"Cancel");
+        button(centerStick, L"Set joystick center");
+        button(finishStick, L"Finish joystick range");
+        button(inputMapping, L"Controller inputs");
+        button(handResponse, L"Hand response");
+        button(jointAdjustment, L"Joint correction");
 
-        creatingPage_ = DesktopPage::devices;
-        button(pair, L"Pair glove", 50, 319, 110);
-        button(stopPair, L"Stop pairing", 169, 319, 117);
-        button(pairBoth, L"Pair both", 295, 319, 113);
-        item(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 50, 427, 90, 26, channelValue);
-        button(setChannel, L"Apply channel", 151, 425, 141);
-        button(vibrate, L"Test motor 1", 472, 319, 188);
-        button(vibrateSecond, L"Test motor 2", 670, 319, 199);
-        button(useJoystick, L"Enable joystick", 472, 421, 187, BS_AUTOCHECKBOX);
-        button(useHaptics, L"Enable vibration", 670, 421, 199, BS_AUTOCHECKBOX);
-        button(quickJoystick, L"Hold stick to toggle joystick", 472, 457, 280, BS_AUTOCHECKBOX);
+        button(pair, L"Pair glove", BS_OWNERDRAW | WS_GROUP);
+        button(stopPair, L"Stop pairing");
+        button(pairBoth, L"Pair both");
+        button(vibrate, L"Test motor 1");
+        button(vibrateSecond, L"Test motor 2");
+        button(useJoystick, L"Enable joystick", BS_AUTOCHECKBOX);
+        button(useHaptics, L"Enable vibration", BS_AUTOCHECKBOX);
+        button(quickJoystick, L"Hold stick to toggle joystick", BS_AUTOCHECKBOX);
         CheckDlgButton(window_, quickJoystick, prefs_.quickStick ? BST_CHECKED : BST_UNCHECKED);
 
-        creatingPage_ = DesktopPage::tracking;
-        const auto tracker = item(L"COMBOBOX", L"", CBS_DROPDOWN | WS_VSCROLL, 50, 322, 358, 210, trackerNum);
-        SendMessageW(tracker, CB_SETDROPPEDWIDTH, 280, 0);
-        edit(posX, 472, 327, 126); edit(posY, 607, 327, 126); edit(posZ, 742, 327, 127);
-        edit(rotX, 472, 404, 126); edit(rotY, 607, 404, 126); edit(rotZ, 742, 404, 127);
-        button(applyPose, L"Apply tracker alignment", 472, 469, 218);
-        button(useHand, L"Publish to SteamVR", 50, 362, 358, BS_AUTOCHECKBOX);
-        button(preferOpenCap, L"Prefer OpenCap in SteamVR", 50, 395, 358, BS_AUTOCHECKBOX);
-        const auto plans = item(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 50, 467, 184, 194, trackingPlan);
+        const auto tracker = item(L"COMBOBOX", L"", CBS_DROPDOWN | WS_VSCROLL | WS_GROUP, trackerNum);
+        SendMessageW(tracker, CB_SETDROPPEDWIDTH, 365, 0);
+        edit(posX); edit(posY); edit(posZ);
+        edit(rotX); edit(rotY); edit(rotZ);
+        button(applyPose, L"Apply tracker alignment");
+        button(useHand, L"Publish to SteamVR", BS_AUTOCHECKBOX);
+        button(preferOpenCap, L"Prefer OpenCap in SteamVR", BS_AUTOCHECKBOX);
+        const auto plans = item(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, trackingPlan);
         for (const auto& preset : trackingPresets)
             SendMessageW(plans, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.name));
         SendMessageW(plans, CB_SETCURSEL, 0, 0);
-        button(useTrackingPlan, L"Apply to both hands", 244, 466, 164);
+        button(useTrackingPlan, L"Apply to both hands");
 
-        creatingPage_ = DesktopPage::streaming;
-        edit(udpIp, 50, 350, 235);
-        edit(vmcPort, 305, 350, 103);
-        edit(oscIp, 472, 350, 269);
-        edit(oscPort, 762, 350, 107);
-        button(applyStream, L"Apply streaming", 50, 457, 167);
+        item(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_GROUP, udpIp);
+        edit(vmcPort);
+        edit(oscIp);
+        edit(oscPort);
+        button(applyStream, L"Apply streaming");
 
-        creatingPage_ = DesktopPage::settings;
-        button(globalHotkey, L"Allow F1 calibration from other apps", 50, 319, 358, BS_AUTOCHECKBOX);
-        button(inspectImage, L"Inspect firmware image…", 472, 320, 199);
+        button(globalHotkey, L"Allow F1 calibration from other apps", BS_AUTOCHECKBOX | WS_GROUP);
+        button(automaticCalibration, L"Automatic hand calibration", BS_AUTOCHECKBOX);
+        CheckDlgButton(window_, automaticCalibration, prefs_.automaticHandCalibration ? BST_CHECKED : BST_UNCHECKED);
+        button(inspectImage, L"Inspect firmware image");
         if (!demo_) {
-            button(steamStartup, L"Start and stop with SteamVR", 50, 357, 358, BS_AUTOCHECKBOX);
+            button(steamStartup, L"Start and stop with SteamVR", BS_AUTOCHECKBOX);
             CheckDlgButton(window_, steamStartup, steamLifecycleEnabled(folder_, prefs_) ? BST_CHECKED : BST_UNCHECKED);
 #ifdef OPENCAP_RECEIVER
-            button(firmwareUpdates, L"Firmware updates…", 680, 320, 189);
+            button(firmwareUpdates, L"Firmware updates");
+            button(recordCalibration, L"Record calibration data", BS_AUTOCHECKBOX);
+            CheckDlgButton(window_, recordCalibration, prefs_.recordCalibration ? BST_CHECKED : BST_UNCHECKED);
+            button(openCalibrationLogs, L"Open log folder");
 #endif
-            button(checkUpdates, L"Check for updates", 472, 438, 184);
-            button(importUdcap, L"Import UDCAP settings", 666, 438, 203);
-            button(includeBetas, L"Include beta releases", 472, 477, 260, BS_AUTOCHECKBOX);
+            button(checkUpdates, L"Check for updates");
+            button(importUdcap, L"Import UDCAP settings");
+            button(includeBetas, L"Include beta releases", BS_AUTOCHECKBOX);
             CheckDlgButton(window_, includeBetas, prefs_.includePrereleases ? BST_CHECKED : BST_UNCHECKED);
         }
-        creatingPage_.reset();
         showStream();
         if (prefs_.hotkey && !RegisterHotKey(window_, 1, MOD_NOREPEAT, VK_F1)) prefs_.hotkey = false;
         CheckDlgButton(window_, globalHotkey, prefs_.hotkey ? BST_CHECKED : BST_UNCHECKED);
@@ -284,21 +365,75 @@ private:
 
     void showPage(DesktopPage page) {
         page_ = page;
-        for (std::size_t i = 0; i < pageControls_.size(); ++i) {
-            for (const auto control : pageControls_[i])
-                ShowWindow(control, i == static_cast<std::size_t>(page) ? SW_SHOWNA : SW_HIDE);
-            InvalidateRect(GetDlgItem(window_, glovesPage + static_cast<int>(i)), nullptr, FALSE);
+        scroll_ = 0;
+        relayout();
+        for (int id = glovesPage; id <= settingsPage; ++id) InvalidateRect(GetDlgItem(window_, id), nullptr, TRUE);
+    }
+
+    void positionControls() {
+        auto batch = BeginDeferWindowPos(settingsPage - leftHand + 1);
+        for (int id = leftHand; id <= settingsPage; ++id) {
+            const auto child = GetDlgItem(window_, id);
+            if (!child) continue;
+            const auto& r = layout_.controls[id];
+            const bool visible = r.right > r.left;
+            const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW);
+            const int x = MulDiv(r.left, dpi_, 96), y = MulDiv(r.top - scroll_, dpi_, 96);
+            const int w = MulDiv(r.right, dpi_, 96) - x, h = MulDiv(r.bottom-scroll_, dpi_, 96) - y;
+            if (batch) batch = DeferWindowPos(batch, child, nullptr, x, y, w, h, flags);
+            else SetWindowPos(child, nullptr, x, y, w, h, flags);
         }
+        if (batch) EndDeferWindowPos(batch);
         InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    void relayout() {
+        if (layingOut_) return;
+        layingOut_ = true;
+        RECT client{};
+        GetClientRect(window_, &client);
+        const int bar = GetSystemMetricsForDpi(SM_CXVSCROLL, dpi_);
+        const int fullWidth = client.right + ((GetWindowLongPtrW(window_, GWL_STYLE) & WS_VSCROLL) ? bar : 0);
+        clientHeight_ = MulDiv(client.bottom, 96, dpi_);
+        const auto makeLayout = [&](int width) {
+            return desktopLayout(MulDiv(width, 96, dpi_), clientHeight_, page_, demo_,
+                                 snapshot_.hands[side_].calibrationStep, snapshot_.calibrationGuide.hands != 0);
+        };
+        layout_ = makeLayout(fullWidth);
+        if (layout_.height > clientHeight_) layout_ = makeLayout(fullWidth - bar);
+        scroll_ = std::clamp(scroll_, 0, std::max(0, layout_.height-clientHeight_));
+        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, layout_.height-1,
+                        static_cast<UINT>(clientHeight_), scroll_};
+        SetScrollInfo(window_, SB_VERT, &info, TRUE);
+        positionControls();
+        layingOut_ = false;
+    }
+
+    void scrollTo(int target) {
+        target = std::clamp(target, 0, std::max(0, layout_.height-clientHeight_));
+        if (scroll_ == target) return;
+        scroll_ = target;
+        SetScrollPos(window_, SB_VERT, scroll_, TRUE);
+        positionControls();
+    }
+
+    void revealFocus() {
+        const auto focus = GetFocus();
+        if (GetParent(focus) != window_) return;
+        const int id = GetDlgCtrlID(focus);
+        if (id < leftHand || id > settingsPage) return;
+        const auto& rect = layout_.controls[id];
+        const int bottom = (id == trackerNum || id == trackingPlan) ? rect.top + 32 : rect.bottom;
+        if (rect.top < scroll_) scrollTo(rect.top - 6);
+        else if (bottom > scroll_ + clientHeight_) scrollTo(bottom + 6 - clientHeight_);
     }
 
     void select(std::size_t side) {
         side_ = side;
         CheckRadioButton(window_, leftHand, rightHand, side ? rightHand : leftHand);
+        InvalidateRect(GetDlgItem(window_, leftHand), nullptr, TRUE);
+        InvalidateRect(GetDlgItem(window_, rightHand), nullptr, TRUE);
         const auto& h = prefs_.hands[side];
-        shownChannel_ = snapshot_.hands[side].channel;
-        if (shownChannel_ >= 0) SetDlgItemInt(window_, channelValue, shownChannel_, FALSE);
-        else SetDlgItemTextW(window_, channelValue, L"");
         CheckDlgButton(window_, useHand, h.enabled ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useJoystick, h.joystick ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(window_, useHaptics, h.haptics ? BST_CHECKED : BST_UNCHECKED);
@@ -389,6 +524,24 @@ private:
         status_ = saveSettings(folder_, prefs_) ? L"Settings saved." : L"Could not save settings.";
     }
 
+#ifdef OPENCAP_RECEIVER
+    void configureRecording(bool enabled) {
+        try {
+            if (enabled) {
+                if (folder_.empty()) throw std::runtime_error("OpenCap's settings folder is unavailable.");
+                calibrationLog_.start(folder_ / L"Calibration Logs");
+            } else calibrationLog_.stop();
+            prefs_.recordCalibration = enabled;
+            save();
+        } catch (const std::exception& error) {
+            prefs_.recordCalibration = false;
+            saveSettings(folder_, prefs_);
+            status_ = widen(error.what());
+        }
+        if (window_) CheckDlgButton(window_, recordCalibration, prefs_.recordCalibration ? BST_CHECKED : BST_UNCHECKED);
+    }
+#endif
+
     void click(int id) {
         if (id >= glovesPage && id <= settingsPage) {
             showPage(static_cast<DesktopPage>(id - glovesPage));
@@ -401,6 +554,15 @@ private:
         case inspectImage: showFirmwareImage(window_); break;
 #ifdef OPENCAP_RECEIVER
         case firmwareUpdates: firmwareMenu(); break;
+        case recordCalibration: configureRecording(IsDlgButtonChecked(window_, id) == BST_CHECKED); break;
+        case openCalibrationLogs: {
+            const auto directory = folder_ / L"Calibration Logs";
+            std::error_code error;
+            if (!folder_.empty()) std::filesystem::create_directories(directory, error);
+            if (folder_.empty() || error || reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", directory.c_str(),
+                    nullptr, nullptr, SW_SHOWNORMAL)) <= 32) status_ = L"Could not open the calibration log folder.";
+            break;
+        }
 #endif
         case checkUpdates:
             if (!launchUpdater(false, prefs_.includePrereleases))
@@ -408,6 +570,14 @@ private:
             break;
         case includeBetas:
             prefs_.includePrereleases = IsDlgButtonChecked(window_, id) == BST_CHECKED;
+            save();
+            break;
+        case automaticCalibration:
+            prefs_.automaticHandCalibration = IsDlgButtonChecked(window_, id) == BST_CHECKED;
+            snapshot_.automaticHandCalibration = prefs_.automaticHandCalibration;
+#ifdef OPENCAP_RECEIVER
+            if (receiver_) receiver_->setAutomaticHandCalibration(prefs_.automaticHandCalibration);
+#endif
             save();
             break;
         case steamStartup:
@@ -431,13 +601,6 @@ private:
         case pair: send(Action::pairStart); break;
         case stopPair: send(bothPairing_ ? Action::pairBothStop : Action::pairStop); bothPairing_ = false; break;
         case pairBoth: send(Action::pairBoth); bothPairing_ = true; break;
-        case setChannel: {
-            BOOL valid = FALSE;
-            const auto channel = GetDlgItemInt(window_, channelValue, &valid, FALSE);
-            if (valid && channel <= 100) send(Action::channel, static_cast<int>(channel));
-            else status_ = L"Enter a channel between 0 and 100.";
-            break;
-        }
         case vibrate: send(Action::hapticTest, 0); break;
         case vibrateSecond: send(Action::hapticTest, 1); break;
         case useHand: settings.enabled = IsDlgButtonChecked(window_, id) == BST_CHECKED; save(); break;
@@ -467,7 +630,7 @@ private:
         }
         case jointAdjustment:
             if (!isLive(snapshot_, static_cast<Side>(side_), now()) || !hand.calibrated) {
-                status_ = L"Connect and calibrate this glove before adjusting its joints.";
+                status_ = L"Connect this glove and move your fingers before adjusting its joints.";
                 break;
             }
             {
@@ -531,6 +694,20 @@ private:
             } else UnregisterHotKey(window_, 1);
             save();
             break;
+        case exportMenu: {
+            const auto menu = CreatePopupMenu();
+            if (!menu) break;
+            AppendMenuW(menu, MF_STRING | (isLive(snapshot_, static_cast<Side>(side_), now()) ? MF_ENABLED : MF_GRAYED),
+                        saveCsv, L"Hand sample (.csv)");
+            if (!demo_) AppendMenuW(menu, MF_STRING, saveCalibration, L"Guided calibration (.csv)");
+            RECT anchor{};
+            GetWindowRect(GetDlgItem(window_, exportMenu), &anchor);
+            const auto choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTALIGN, anchor.right, anchor.bottom,
+                                               0, window_, nullptr);
+            DestroyMenu(menu);
+            if (choice) click(choice);
+            break;
+        }
         case saveCsv: exportCsv(); break;
         case saveCalibration:
 #ifdef OPENCAP_RECEIVER
@@ -540,7 +717,7 @@ private:
                 break;
             }
 #endif
-            status_ = L"Connect a glove with a saved calibration to export it.";
+            status_ = L"Export requires a saved guided calibration for this glove.";
             break;
         case handView:
             if (!openHandView(window_, static_cast<unsigned>(side_))) status_ = L"Could not open the hand viewer.";
@@ -568,7 +745,7 @@ private:
             status_ = settings.joystick ? L"Joystick enabled." : L"Joystick disabled.";
         else status_ = L"Joystick changed but the setting could not be saved.";
         if (settings.haptics && isLive(snapshot_, static_cast<Side>(side), now()))
-            bus_.send({static_cast<Side>(side), Action::haptic, 0, .12f, .75f});
+            bus_.send({static_cast<Side>(side), Action::hapticTest, snapshot_.hands[side].controllerRevision == 2 ? 1 : 0});
     }
 
     void changeTracker(std::size_t side, bool automatic) {
@@ -606,25 +783,30 @@ private:
     }
 
     bool sendCalibration(Action action) {
-        const std::array commands{Command{Side::left, action, quickId_}, Command{Side::right, action, quickId_}};
-        return bus_.send(commands);
+        std::array<Command, handCount> commands{};
+        std::size_t count = 0;
+        for (unsigned i = 0; i < handCount; ++i)
+            if (snapshot_.calibrationGuide.hands & (1u << i))
+                commands[count++] = {static_cast<Side>(i), action, quickId_};
+        return bus_.send(std::span(commands).first(count));
     }
 
     void startQuick() {
         auto& guide = snapshot_.calibrationGuide;
         if (guide.hands) return;
         const auto time = now();
-        if (!handCalibrationReady(snapshot_, time)) {
-            finishQuick(CalibrationResult::failed, L"Connect both gloves and finish any active joystick calibration.");
+        const auto hands = handsReadyForCalibration(snapshot_, time);
+        if (!hands) {
+            finishQuick(CalibrationResult::failed, L"Connect a glove and finish its joystick calibration.");
             return;
         }
         if (quickId_ == std::numeric_limits<int>::max()) quickId_ = 0;
         ++quickId_;
+        guide = {hands, 1};
         if (!sendCalibration(Action::startHand)) {
             finishQuick(CalibrationResult::failed, L"The command queue is busy. Start calibration again.");
             return;
         }
-        guide = {(1u << handCount) - 1, 1};
         quickDeadline_ = time + captureTimeout;
         status_.clear();
     }
@@ -650,7 +832,9 @@ private:
         auto& guide = snapshot_.calibrationGuide;
         if (!guide.hands) return;
         bool ready = true;
+        bool sessionOnly = false;
         for (std::size_t i = 0; i < handCount; ++i) {
+            if (!(guide.hands & (1u << i))) continue;
             const auto& hand = snapshot_.hands[i];
             if (!isLive(snapshot_, static_cast<Side>(i), time)) {
                 stopQuick(L"Glove connection lost. Reconnect and start calibration again.", CalibrationResult::failed);
@@ -663,6 +847,10 @@ private:
                 return;
             }
             const bool saving = guide.phase > captureActions.size();
+            if (saving && hand.calibrationResult == CalibrationResult::sessionOnly && !hand.calibrationStep) {
+                sessionOnly = true;
+                continue;
+            }
             const auto expected = saving ? CalibrationResult::saved : CalibrationResult::active;
             if (hand.calibrationResult != expected || hand.calibrationStep != (saving ? 0 : guide.phase)) ready = false;
         }
@@ -672,7 +860,9 @@ private:
             return;
         }
         if (guide.phase > captureActions.size()) {
-            finishQuick(CalibrationResult::saved, L"Hand calibration complete.");
+            if (sessionOnly)
+                finishQuick(CalibrationResult::sessionOnly, L"Calibration applied. A glove profile could not be saved for the next session.");
+            else finishQuick(CalibrationResult::saved, L"Hand calibration complete.");
             voice_.say(L"Calibration complete.");
             return;
         }
@@ -824,7 +1014,15 @@ private:
             status_ = L"Connect a receiver for this hand first.";
         }
 #ifdef OPENCAP_RECEIVER
-        if (receiver_) snapshot_.hands = receiver_->read();
+        if (receiver_) {
+            receiver_->setTriggerFeedback(prefs_.hands);
+            snapshot_.hands = receiver_->read();
+        }
+        if (prefs_.recordCalibration && !calibrationLog_.active()) {
+            const auto error = calibrationLog_.takeError();
+            configureRecording(false);
+            status_ = error.empty() ? L"Calibration recording stopped." : widen(error);
+        }
 #endif
         if (demo_) {
             for (std::size_t s = 0; s < handCount; ++s) {
@@ -863,16 +1061,11 @@ private:
         stream_.send(snapshot_);
         const auto& selected = snapshot_.hands[side_];
         const bool gloveLive = isLive(snapshot_, static_cast<Side>(side_), snapshot_.heartbeat);
-        const bool channelAvailable = selected.receiver && selected.pendingChannel < 0;
-        if (channelAvailable != channelAvailable_) {
-            channelAvailable_ = channelAvailable;
-            EnableWindow(GetDlgItem(window_, channelValue), channelAvailable);
-            EnableWindow(GetDlgItem(window_, setChannel), channelAvailable);
-        }
-        if (shownChannel_ != selected.channel && GetFocus() != GetDlgItem(window_, channelValue)) {
-            shownChannel_ = selected.channel;
-            if (shownChannel_ >= 0) SetDlgItemInt(window_, channelValue, shownChannel_, FALSE);
-            else SetDlgItemTextW(window_, channelValue, L"");
+        const bool editable = gloveLive && selected.calibrated;
+        if (editable != handEditable_) {
+            handEditable_ = editable;
+            EnableWindow(GetDlgItem(window_, jointAdjustment), editable);
+            EnableWindow(GetDlgItem(window_, handResponse), editable && !demo_);
         }
         const auto revision = selected.controllerRevision;
         if (lastControllerRevision_ != revision || lastVibrationAvailable_ != gloveLive) {
@@ -885,7 +1078,7 @@ private:
         }
         const auto stage = selected.calibrationStep;
         const bool guiding = snapshot_.calibrationGuide.hands != 0;
-        const bool calibrationReady = handCalibrationReady(snapshot_, snapshot_.heartbeat);
+        const bool calibrationReady = handsReadyForCalibration(snapshot_, snapshot_.heartbeat) != 0;
         if (lastCalibrationReady_ != calibrationReady) {
             lastCalibrationReady_ = calibrationReady;
             EnableWindow(GetDlgItem(window_, nextPose), calibrationReady);
@@ -894,10 +1087,11 @@ private:
             lastStage_ = stage;
             lastGuiding_ = guiding;
             lastCalibrationLive_ = gloveLive;
-            SetDlgItemTextW(window_, nextPose, guiding ? L"Calibration running…" : L"Calibrate both gloves");
+            SetDlgItemTextW(window_, nextPose, guiding ? L"Calibration running…" : L"Guided calibration");
             EnableWindow(GetDlgItem(window_, cancelPose), guiding || (stage >= 1 && stage <= 3));
             EnableWindow(GetDlgItem(window_, centerStick), gloveLive && !guiding && (stage == 0 || stage == 4));
             EnableWindow(GetDlgItem(window_, finishStick), gloveLive && stage == 4);
+            relayout();
             if (stage == 4 && GetFocus() == GetDlgItem(window_, centerStick))
                 SetFocus(GetDlgItem(window_, finishStick));
         }
@@ -932,7 +1126,7 @@ private:
             }
         }
 #endif
-        status_ = L"Connect and calibrate this glove before editing its response.";
+        status_ = L"Connect this glove and move your fingers before editing its response.";
     }
 
 #ifdef OPENCAP_RECEIVER
@@ -1007,7 +1201,8 @@ private:
         if (folder_.empty()) return;
         try {
             auto vendor = readUdcapPreferences(findUdcapSources(folder_.parent_path()));
-            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver), prefs_.udcapImport);
+            receiver_ = std::make_unique<Receiver>(folder_ / "Gloves", std::move(vendor.receiver),
+                                                   prefs_.udcapImport, prefs_.automaticHandCalibration, calibrationLog_);
         } catch (const std::exception& error) {
             status_ = widen(error.what());
         }
@@ -1025,9 +1220,9 @@ private:
     HANDLE steamOverlay_{};
     unsigned lastControllerRevision_{UINT32_MAX};
     bool lastVibrationAvailable_{}, lastGuiding_{}, lastCalibrationLive_{}, lastCalibrationReady_{};
-    int shownChannel_{-1};
-    std::optional<bool> channelAvailable_;
+    std::optional<bool> handEditable_;
 #ifdef OPENCAP_RECEIVER
+    CalibrationLog calibrationLog_;
     std::unique_ptr<Receiver> receiver_;
     std::atomic<unsigned> firmwareProgress_{};
     bool nativeWireless_{};
@@ -1035,9 +1230,11 @@ private:
 #endif
     HWND window_{};
     DesktopPage page_{DesktopPage::gloves};
-    std::optional<DesktopPage> creatingPage_;
-    std::array<std::vector<HWND>, pageNames.size()> pageControls_;
-    HFONT font_{}, title_{}, section_{};
+    DesktopLayout layout_;
+    unsigned dpi_{96};
+    int scroll_{}, clientHeight_{}, wheelDelta_{};
+    bool layingOut_{};
+    HFONT font_{}, controlFont_{}, section_{};
     HBRUSH brush_{};
     std::size_t side_{};
     unsigned lastStage_{UINT32_MAX};
@@ -1045,7 +1242,7 @@ private:
     std::array<unsigned, handCount> demoSteps_{}, lastRequests_{};
     std::array<int, handCount> demoCalibrationIds_{};
     std::array<CalibrationResult, handCount> demoResults_{};
-    std::array<int, handCount> demoChannels_{20, 40};
+    std::array<int, handCount> demoChannels_{2, 7};
     std::array<bool, handCount> demoPairing_{};
     std::array<std::array<Vec3, jointCount>, handCount> demoOffsets_{};
     std::array<ButtonRanges, handCount> demoRanges_{defaultButtonRanges, defaultButtonRanges};

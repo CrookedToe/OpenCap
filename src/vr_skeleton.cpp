@@ -130,9 +130,9 @@ std::array<float, 5> fingerSpread(const Hand& hand, Side side) {
                                   defaultSplayCurves[finger].max);
     };
     const auto middle = static_cast<float>(hand.splayCurves[1].offset) * (side == Side::left ? -1 : 1);
-    const auto ring = spread(2, 1, 10);
+    const auto ring = spread(2, 1, 14);
     // The three measurements are adjacent gaps. Anchor the fan at the middle finger.
-    return {0, middle - spread(0, 0, 12), middle, middle + ring, middle + ring + spread(3, 2, 12)};
+    return {0, middle - spread(0, 0, 18), middle, middle + ring, middle + ring + spread(3, 2, 18)};
 }
 
 auto resolveBoneTransforms(const VrHandSkeleton& poses, const vr::VRBoneTransform_t& wrist) {

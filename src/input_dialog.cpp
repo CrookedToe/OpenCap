@@ -311,11 +311,13 @@ void showDialog(HWND owner, const wchar_t* name, const wchar_t* title,
     cls.lpszClassName = name;
     cls.lpfnWndProc = procedure;
     if (!RegisterClassW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+    const auto originalDpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED);
     RECT bounds{};
     GetWindowRect(owner, &bounds);
     const auto window = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, name,
         title, WS_POPUP | WS_CAPTION | WS_SYSMENU, bounds.left + 180, bounds.top + 140,
         380, height, owner, nullptr, cls.hInstance, state);
+    SetThreadDpiAwarenessContext(originalDpi);
     if (!window) return;
     EnableWindow(owner, FALSE);
     ShowWindow(window, SW_SHOW);

@@ -6,8 +6,8 @@ The Windows reference installation identifies its desktop executable and assembl
 
 | Area | Implemented | Acceptance still needed |
 | --- | --- | --- |
-| Receiver and radio | Windows COM discovery and wake reconnect, community core probe and telemetry, pairing, desktop channel controls verified by receiver readback, radio signal in both interfaces, vibration | Confirm receiver identities and exercise both gloves, combined and wired devices, reconnect, and radio interference on accessible hardware |
-| Calibration | Automatic three-pose capture with spoken prompts and a three-second countdown per pose, UDCAP per-channel flexion/splay grades and CSV export, cancel and recovery, saved joystick center and range | Compare displayed grades and glove response on live captures and check persistence after restarts |
+| Receiver and radio | Windows COM discovery and wake reconnect, community core probe and telemetry, pairing, automatic channel selection from frame gaps on single-hand receivers, receiver-confirmed channel, radio signal in both interfaces, vibration | Confirm receiver identities and exercise both gloves, combined and wired devices, reconnect, and radio interference on accessible hardware |
+| Calibration | Per-glove live bend and splay ranges, optional guided three-pose capture, UDCAP per-channel flexion/splay grades and CSV export, cancel and recovery, saved joystick center and range | Compare displayed grades and glove response on live captures and check persistence after restarts |
 | Desktop | Live hand and data viewers, controller input meters, digital remapping, touch and click threshold editors, five-second joystick shortcut, editable per-glove response curves, joint corrections, four UDCAP tracker presets, and CSV sample export | Compare live settings and response against UDCAP, including all controller inputs and toggle behavior |
 | Controllers | Compact and extended joystick frames, controller revision display, separate Controller 1.0 motor tests and Controller 2.0 intensity tests, revision-aware haptics and joystick calibration commands | Exercise both revisions on hardware, including V2 calibration responses, remaining gestures, and actuator behavior |
 | Streaming | VMC finger transforms and controller blends, neutral state on connection loss, UDCAP VRChat OSC parameters | Compare motion and input in a VMC or VRChat client using live gloves |
@@ -45,7 +45,7 @@ The Windows reference installation identifies its desktop executable and assembl
 
 ## Calibration roadmap
 
-Replace the timed pose workflow with live calibration after the current capture and persistence behavior is verified on both hands.
+Check live calibration on each glove from an empty profile, after refitting mid-session, and after restarting. Compare together, half-spread, full spread and a relaxed fist in the desktop preview and SteamVR.
 
 ## Evidence
 

@@ -6,6 +6,7 @@
 *.user
 *.log
 *.csv
+calibration-*.jsonl
 *.bin
 *.exe
 *.dll

@@ -53,6 +53,9 @@ int wmain(int argc, wchar_t** argv) {
         require(!withoutVendor.found && withoutVendor.receiver[0].empty() && withoutVendor.receiver[1].empty(),
                 "OpenCap starts with its own defaults when UDCAP configuration files are absent");
         Preferences preferences;
+        require(loadSettings(f.root).automaticHandCalibration, "New installations learn automatically");
+        preferences.automaticHandCalibration = false;
+        preferences.recordCalibration = true;
         preferences.quickStick = true;
         preferences.steamLifecycle = true;
         preferences.hands[0].tracker = 8;
@@ -62,6 +65,21 @@ int wmain(int argc, wchar_t** argv) {
         saved >> format;
         saved.close();
         const auto restored = loadSettings(f.root);
+        require(!restored.automaticHandCalibration, "Keep automatic calibration off across restarts");
+        require(restored.recordCalibration, "Keep calibration recording enabled across restarts");
+        {
+            std::ifstream input(f.root / L"settings.txt");
+            std::string legacy{std::istreambuf_iterator<char>{input}, {}};
+            input.close();
+            legacy.erase(legacy.rfind(' '));
+            put(f.root / L"settings.txt", legacy + "\n");
+            require(!loadSettings(f.root).recordCalibration, "Upgrades keep recording off until requested");
+            legacy.erase(legacy.rfind(' '));
+            put(f.root / L"settings.txt", legacy + "\n");
+            const auto upgraded = loadSettings(f.root);
+            require(upgraded.automaticHandCalibration && upgraded.hands[0].tracker == 8,
+                    "Existing settings without a calibration mode retain automatic learning");
+        }
         require(format == 3 && restored.quickStick && restored.steamLifecycle == true && restored.hands[0].tracker == 8,
                 "New preferences retain a file version the previous application can read");
         require(!steamLifecycleEnabled(f.root, {}), "Portable desktop keeps autostart off by default");

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sensor_calibration.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -32,13 +34,12 @@ struct ButtonRange {
 };
 using ButtonRanges = std::array<ButtonRange, 3>;
 constexpr ButtonRanges defaultButtonRanges{{{.25f, .5f}, {.5f, 1}, {.5f, 1}}};
-using RawGloveSample = std::array<std::int16_t, 19>;
-using CalibrationSamples = std::array<RawGloveSample, 3>;
 struct FingerSplay {
     std::array<float, 3> gaps{};
     bool measured{};
 };
 FingerSplay calibratedSplay(const CalibrationSamples& calibration, const RawGloveSample& sample);
+FingerSplay calibratedSplay(const SensorRange& range, const RawGloveSample& sample);
 struct HandCurve {
     double min{}, max{}, balance{.5}, offset{};
 };
@@ -56,6 +57,7 @@ struct CalibrationSpans {
     bool measured{};
 };
 CalibrationSpans calibrationSpans(const CalibrationSamples& samples);
+CalibrationSpans calibrationSpans(const SensorRange& range);
 void writeCalibrationReport(std::ostream& output, Side side, const CalibrationSamples& samples);
 
 class StickHold {
@@ -67,7 +69,22 @@ private:
     bool pressed_{}, consumed_{};
 };
 
-enum class CalibrationResult : std::uint8_t { idle, active, saved, canceled, failed };
+class TriggerClick {
+public:
+    bool update(bool enabled, bool pressed, float pull) {
+        if (!enabled) armed_ = false;
+        else if (!pressed && pull < .85f) armed_ = true;
+        else if (pressed && armed_) {
+            armed_ = false;
+            return true;
+        }
+        return false;
+    }
+private:
+    bool armed_{};
+};
+
+enum class CalibrationResult : std::uint8_t { idle, active, saved, canceled, failed, sessionOnly };
 constexpr Millis calibrationCountdown = 3000;
 struct CalibrationGuide {
     unsigned hands{};
@@ -143,6 +160,7 @@ struct Snapshot {
     Millis heartbeat{};
     bool demo{};
     bool receiverSupported{};
+    bool automaticHandCalibration{true};
     CalibrationGuide calibrationGuide{};
     std::array<Hand, handCount> hands{};
     std::array<HandSettings, handCount> settings{};
@@ -191,7 +209,7 @@ bool validButtonRange(ButtonRange range);
 void applyHandPreferences(Hand& hand, const HandSettings& settings);
 
 bool isLive(const Snapshot& snapshot, Side side, Millis now);
-bool handCalibrationReady(const Snapshot& snapshot, Millis time);
+unsigned handsReadyForCalibration(const Snapshot& snapshot, Millis time);
 std::uint32_t remapButtons(std::uint32_t input, const ButtonMap& map);
 Quaternion normalize(Quaternion value);
 Quaternion multiply(Quaternion a, Quaternion b);

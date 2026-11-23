@@ -11,7 +11,7 @@
 namespace opencap {
 Millis now();
 std::wstring widen(std::string_view value);
-inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v13";
+inline constexpr wchar_t sessionName[] = L"Local\\OpenCap.Session.v14";
 
 class Bus {
 public:

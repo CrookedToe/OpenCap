@@ -15,6 +15,8 @@ struct Preferences {
     bool quickStick{};
     std::optional<bool> steamLifecycle;
     bool includePrereleases{};
+    bool automaticHandCalibration{true};
+    bool recordCalibration{};
 };
 
 std::filesystem::path executableFolder();

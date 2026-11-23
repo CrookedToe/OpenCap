@@ -53,9 +53,9 @@ target_link_libraries(opencap_desktop_preferences PUBLIC opencap_bridge PRIVATE 
 add_library(opencap_firmware STATIC src/firmware_image.cpp src/firmware_transfer.cpp)
 target_include_directories(opencap_firmware PUBLIC src)
 target_link_libraries(opencap_firmware PRIVATE bcrypt crypt32)
-add_executable(OpenCap WIN32 src/desktop.cpp src/desktop_main.cpp src/desktop_view.cpp
-    src/hand_view.cpp src/input_dialog.cpp src/stream.cpp)
-target_link_libraries(OpenCap PRIVATE opencap_desktop_preferences opencap_udcap_preferences opencap_firmware shell32 ole32 comdlg32 comctl32 ws2_32 sapi)
+add_executable(OpenCap WIN32 src/desktop.cpp src/desktop_main.cpp src/desktop_view.cpp src/desktop_layout.cpp
+    src/hand_view.cpp src/hand_drawing.cpp src/input_dialog.cpp src/stream.cpp)
+target_link_libraries(OpenCap PRIVATE opencap_desktop_preferences opencap_udcap_preferences opencap_firmware gdiplus shell32 ole32 comdlg32 comctl32 ws2_32 sapi)
 if(OPENCAP_RECEIVER)
     find_package(Git REQUIRED)
     set(BUILD_TEST_TOOLS OFF CACHE BOOL "" FORCE)
@@ -65,10 +65,15 @@ if(OPENCAP_RECEIVER)
         PATCH_COMMAND "${CMAKE_COMMAND}" "-DGIT=${GIT_EXECUTABLE}"
             "-DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-calibration.patch"
             "-DCONTROLLER_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-controller.patch"
+            "-DLIVE_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-live-calibration.patch"
+            "-DMODE_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-calibration-mode.patch"
+            "-DRECORDING_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/community-calibration-recording.patch"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchCommunityCore.cmake")
     FetchContent_MakeAvailable(community_core)
     target_sources(UdCapCommunityDriverCore PRIVATE "${community_core_SOURCE_DIR}/src/UdCapProbe.cpp")
-    target_sources(OpenCap PRIVATE src/receiver.cpp)
+    target_sources(UdCapCommunityDriverCore PRIVATE src/live_calibration.cpp)
+    target_include_directories(UdCapCommunityDriverCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_sources(OpenCap PRIVATE src/receiver.cpp src/radio_channel.cpp src/calibration_log.cpp)
     target_link_libraries(OpenCap PRIVATE UdCapCommunityDriverCore cfgmgr32)
     target_compile_definitions(OpenCap PRIVATE OPENCAP_RECEIVER=1)
 endif()
@@ -105,6 +110,12 @@ if(OPENCAP_RECEIVER)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(OpenCapRadioChecks tests/radio_channel.cpp src/radio_channel.cpp)
+    target_link_libraries(OpenCapRadioChecks PRIVATE opencap_bridge)
+    add_test(NAME OpenCapRadioChecks COMMAND OpenCapRadioChecks)
+    add_executable(OpenCapDesktopLayoutChecks tests/desktop_layout.cpp src/desktop_layout.cpp)
+    target_link_libraries(OpenCapDesktopLayoutChecks PRIVATE opencap_bridge)
+    add_test(NAME OpenCapDesktopLayoutChecks COMMAND OpenCapDesktopLayoutChecks)
     add_executable(OpenCapChecks tests/checks.cpp src/stream.cpp)
     target_link_libraries(OpenCapChecks PRIVATE opencap_bridge ws2_32)
     target_include_directories(OpenCapChecks PRIVATE "${OPENVR_SDK_ROOT}/headers")
@@ -125,7 +136,7 @@ if(BUILD_TESTING)
     target_link_libraries(OpenCapFirmwareChecks PRIVATE opencap_firmware)
     add_test(NAME OpenCapFirmwareChecks COMMAND OpenCapFirmwareChecks)
     if(OPENCAP_RECEIVER)
-        add_executable(OpenCapCalibrationChecks tests/calibration.cpp)
+        add_executable(OpenCapCalibrationChecks tests/calibration.cpp src/calibration_log.cpp)
         target_link_libraries(OpenCapCalibrationChecks PRIVATE UdCapCommunityDriverCore)
         add_test(NAME OpenCapCalibrationChecks COMMAND OpenCapCalibrationChecks)
     endif()

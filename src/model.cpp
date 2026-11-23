@@ -7,29 +7,24 @@
 #include <ostream>
 
 namespace opencap {
-static constexpr bool isSplayChannel(std::size_t index) { return index == 4 || index == 7 || index == 10; }
-
 FingerSplay calibratedSplay(const CalibrationSamples& calibration, const RawGloveSample& sample) {
-    constexpr std::array channels{4, 7, 10};
+    return calibratedSplay(sensorRange(calibration), sample);
+}
+
+FingerSplay calibratedSplay(const SensorRange& range, const RawGloveSample& sample) {
     FingerSplay result{{}, true};
-    for (std::size_t gap = 0; gap < channels.size(); ++gap) {
-        const auto channel = channels[gap];
-        const int together = calibration[1][channel];
-        const int span = calibration[2][channel] - together;
-        if (std::abs(span) <= 25) continue;
+    for (std::size_t gap = 0; gap < splaySensorChannels.size(); ++gap) {
+        const auto channel = splaySensorChannels[gap];
+        const int together = range[0][channel];
+        const int span = range[1][channel] - together;
+        if (std::abs(span) < minimumSplaySpan) continue;
         result.gaps[gap] = std::clamp(static_cast<float>(sample[channel] - together) / span, 0.0f, 1.0f);
     }
     return result;
 }
 
 CalibrationGrade calibrationGrade(std::size_t channel, std::uint16_t movement) {
-    // Minimum movement for Average, Good, and Excellent in the UDCAP 0.1.8.7 hand viewer.
-    constexpr std::array<std::array<std::uint16_t, 3>, 12> limits{{
-        {420, 700, 1050}, {210, 350, 700}, {130, 220, 350}, {200, 350, 700},
-        {130, 220, 350}, {150, 250, 500}, {230, 380, 800}, {130, 220, 350},
-        {150, 250, 500}, {200, 350, 700}, {130, 220, 350}, {300, 500, 950}
-    }};
-    const auto& cutoffs = limits.at(channel);
+    const auto& cutoffs = sensorGradeThresholds.at(channel);
     return static_cast<CalibrationGrade>(std::ranges::upper_bound(cutoffs, movement) - cutoffs.begin());
 }
 
@@ -39,11 +34,15 @@ const char* calibrationGradeName(CalibrationGrade grade) {
 }
 
 CalibrationSpans calibrationSpans(const CalibrationSamples& samples) {
+    return calibrationSpans(sensorRange(samples));
+}
+
+CalibrationSpans calibrationSpans(const SensorRange& range) {
     CalibrationSpans result;
     result.measured = true;
     for (std::size_t i = 0; i < result.counts.size(); ++i) {
         const auto span = static_cast<std::uint16_t>(std::abs(
-            static_cast<int>(samples[isSplayChannel(i) ? 2 : 0][i]) - samples[1][i]));
+            static_cast<int>(range[1][i]) - range[0][i]));
         result.counts[i] = span;
         if (calibrationGrade(i, span) == CalibrationGrade::poor) ++result.lowChannels;
     }
@@ -148,9 +147,13 @@ bool isLive(const Snapshot& snapshot, Side side, Millis now) {
         && now - hand.lastFrame <= sampleTimeout && now - snapshot.heartbeat <= sampleTimeout;
 }
 
-bool handCalibrationReady(const Snapshot& snapshot, Millis time) {
-    return !snapshot.calibrationGuide.hands && isLive(snapshot, Side::left, time) && isLive(snapshot, Side::right, time)
-        && std::ranges::all_of(snapshot.hands, [](const Hand& hand) { return hand.calibrationStep == 0; });
+unsigned handsReadyForCalibration(const Snapshot& snapshot, Millis time) {
+    unsigned hands = 0;
+    if (!snapshot.calibrationGuide.hands)
+        for (unsigned i = 0; i < handCount; ++i)
+            if (!snapshot.hands[i].calibrationStep && isLive(snapshot, static_cast<Side>(i), time))
+                hands |= 1u << i;
+    return hands;
 }
 
 Quaternion normalize(Quaternion q) {
@@ -198,6 +201,9 @@ Hand demoHand(Side side, Millis now) {
     hand.channel = side == Side::left ? 20 : 50;
     hand.stickX = std::cos(t);
     hand.stickY = std::sin(t);
+    hand.splay.measured = true;
+    for (std::size_t gap = 0; gap < hand.splay.gaps.size(); ++gap)
+        hand.splay.gaps[gap] = .5f + .5f * std::cos(2.0f * t + .25f * static_cast<float>(gap));
     for (std::size_t finger = 0; finger < hand.curl.size(); ++finger) {
         const auto curl = (std::sin(t * 2.0f + static_cast<float>(finger) * .4f) + 1.0f) / 2.0f;
         hand.curl[finger] = curl;

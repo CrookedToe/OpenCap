@@ -11,6 +11,7 @@
 #include <optional>
 
 namespace opencap {
+class CalibrationLog;
 struct WirelessFirmwareTarget {
     std::wstring port;
     std::string serial;
@@ -23,7 +24,7 @@ void updateWirelessGlove(const FirmwareUpdateImage& image, const WirelessFirmwar
 class Receiver {
 public:
     Receiver(const std::filesystem::path& preferences, std::array<ReceiverPreferences, handCount> defaults,
-             std::uint64_t importRevision);
+             std::uint64_t importRevision, bool automaticHandCalibration, CalibrationLog& log);
     ~Receiver();
     Receiver(const Receiver&) = delete;
     Receiver& operator=(const Receiver&) = delete;
@@ -33,6 +34,8 @@ public:
     std::optional<HandCurves> handCurves(Side side) const;
     std::optional<WirelessFirmwareTarget> wirelessFirmwareTarget(Side side) const;
     bool submit(const Command& command);
+    void setAutomaticHandCalibration(bool enabled);
+    void setTriggerFeedback(const std::array<HandSettings, handCount>& hands);
     void importPreferences(std::array<ReceiverPreferences, handCount> defaults, std::uint64_t importRevision);
 
 private:

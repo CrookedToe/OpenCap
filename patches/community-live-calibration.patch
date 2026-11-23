@@ -1,0 +1,230 @@
+--- a/src/CommunityV1Calibration.h
++++ b/src/CommunityV1Calibration.h
+@@ -18,6 +18,7 @@
+         Values high{};
+     };
+ 
++    void resetChannel(std::size_t index, double low, double high);
+     void reset(const Values &low, const Values &high);
+     // Refreshes observed extrema while retaining the official calibration's
+     // twelve-channel low/high convention for downstream normalization.
+--- a/src/CommunityV1Calibration.cpp
++++ b/src/CommunityV1Calibration.cpp
+@@ -42,16 +42,17 @@
+ }
+ 
+ void CommunityV1Calibration::reset(const Values &low, const Values &high) {
+-    for (std::size_t i = 0; i < channelCount; ++i) {
+-        auto &c = channels[i];
+-        c = Channel{};
+-        c.workingLow = c.targetLow = std::isfinite(low[i]) ? low[i] : 0.0;
+-        c.workingHigh = c.targetHigh = std::isfinite(high[i]) ? high[i] : c.workingLow;
+-        c.usable = std::isfinite(low[i]) && std::isfinite(high[i]) &&
+-                   high[i] - low[i] >= minimumSpan;
+-    }
++    for (std::size_t i = 0; i < channelCount; ++i) resetChannel(i, low[i], high[i]);
+     initialized = true;
+     hasFrameTime = false;
++}
++
++void CommunityV1Calibration::resetChannel(std::size_t index, double low, double high) {
++    auto &c = channels.at(index);
++    c = Channel{};
++    c.workingLow = c.targetLow = std::isfinite(low) ? low : 0.0;
++    c.workingHigh = c.targetHigh = std::isfinite(high) ? high : c.workingLow;
++    c.usable = std::isfinite(low) && std::isfinite(high) && high - low >= minimumSpan;
+ }
+ 
+ void CommunityV1Calibration::recordTurn(Channel &c, bool low, double value, Clock::time_point now) {
+--- a/src/UdCapV1Core.h
++++ b/src/UdCapV1Core.h
+@@ -19,7 +19,7 @@
+ #include <string>
+ #include <thread>
+ #include <vector>
+-#include "CommunityV1Calibration.h"
++#include "live_calibration.hpp"
+ #include "HandResponse.h"
+ 
+ #define Default_xCenterData 1850.0;
+@@ -152,6 +152,7 @@
+     bool isReady;
+     bool isEnterprise;
+     std::array<int16_t, 19> angle;
++    std::optional<opencap::SensorRange> liveRange;
+     std::array<double, 28> result;
+     // Snapshot accompanying CMD_ANGLE. Scalar protocols project supported axes;
+     // skeleton protocols apply all local XYZ offsets before their own mapping.
+@@ -381,6 +382,8 @@
+     void completeCalibration(UdCapV1DeviceCaliType type);
+ 
+     void tryRestoreHandCalibration();
++    void enableLiveHandCalibration(const std::string &serial);
++    std::optional<opencap::SensorRange> liveHandRange() const;
+ 
+     using CalibrationSamples = std::array<std::array<int16_t, 19>, 3>;
+     std::optional<CalibrationSamples> handCalibrationSamples() const;
+@@ -456,9 +459,11 @@
+     std::recursive_mutex streamingMutex;
+     bool streamingShutdown = false;
+     std::atomic<UdCapV1HandCaliStat> caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+-    UdCapV1HandCaliFist caliFist;
+-    UdCapV1HandCaliAdduction caliAdduction;
+-    UdCapV1HandCaliProtract caliProtract;
++    bool liveEnabled = false;
++    opencap::LiveHandCalibration liveHand;
++    UdCapV1HandCaliFist caliFist{};
++    UdCapV1HandCaliAdduction caliAdduction{};
++    UdCapV1HandCaliProtract caliProtract{};
+     UdCapV1Algorithm algorithm = UdCapV1Algorithm::DEFAULT;
+     CommunityV1Calibration communityCalibration;
+     bool communityCalibrationNeedsReset = true;
+--- a/src/UdCapV1Core.cpp
++++ b/src/UdCapV1Core.cpp
+@@ -180,6 +180,8 @@
+                 if (udState != UD_INIT_STATE_INIT) {
+                     udState = UD_INIT_STATE_NOT_CONNECT;
+                     caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
++                    liveHand.reset(liveHand.range());
++                    count = 0;
+                     controllerPresent = false;
+                     controllerRevision = 0;
+                     joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
+@@ -309,6 +311,9 @@
+         if (!isUdCapGloveSerial(serial)) return;
+         if (udCapSerial == serial) return;
+         savedCalibration.reset();
++        liveEnabled = false;
++        liveHand.reset({});
++        count = 0;
+         caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
+         controllerPresent = false;
+         controllerRevision = 0;
+@@ -347,6 +352,8 @@
+             }
+             udState = UdState::UD_INIT_STATE_NOT_CONNECT;
+             caliStat = UDCAP_V1_HAND_CALI_STAT_NONE;
++            liveHand.reset(liveHand.range());
++            count = 0;
+             controllerPresent = false;
+             controllerRevision = 0;
+             joystickCaliStat = UDCAP_V1_JOYSTICK_CALI_STAT_OK;
+@@ -451,6 +458,8 @@
+         }
+         lastRaw = iData;
+         packet.angle = iData;
++        if (liveEnabled && udState == UD_INIT_STATE_LINKED && caliStat != UDCAP_V1_HAND_CALI_STAT_AUTO)
++            packet.liveRange = liveHand.update(iData);
+         callListenCallback(packet);
+         // Start Calc
+         memset(&lastAngle, 0, sizeof(lastAngle));
+@@ -487,7 +496,7 @@
+             }
+         }
+ 
+-        if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
++        if (packet.liveRange || caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
+             double f[12]{
+                 lastAngle.f4,
+                 lastAngle.f5,
+@@ -531,7 +540,15 @@
+                 caliFist.h15
+             };
+             float nn = 100.0;
+-            if (algorithm == UdCapV1Algorithm::COUMMUNITY_V1) {
++            if (packet.liveRange) {
++                for (std::size_t i = 0; i < 12; ++i) {
++                    const auto &range = *packet.liveRange;
++                    const int sign = range[1][i] < range[0][i] ? -1 : 1;
++                    array2[i] = sign * range[0][i];
++                    array3[i] = sign * range[1][i];
++                    f[i] *= sign;
++                }
++            } else if (algorithm == UdCapV1Algorithm::COUMMUNITY_V1) {
+                 CommunityV1Calibration::Values raw{};
+                 if (communityCalibrationNeedsReset) {
+                     CommunityV1Calibration::Values low{};
+@@ -1048,6 +1065,7 @@
+     if (udState != UD_INIT_STATE_LINKED) {
+         throw std::runtime_error("Core not initialized");
+     }
++    if (type == UDCAP_V1_HAND_CALI_TYPE_ALL) liveHand.reset({});
+         if (caliStat == UDCAP_V1_HAND_CALI_STAT_COMPLETED) {
+             if (type != UDCAP_V1_HAND_CALI_TYPE_ALL) {
+             throw std::runtime_error("Can not clear single calibration data after completed");
+@@ -1145,6 +1163,7 @@
+             throw std::runtime_error("Calibration failed. Move your fingers further apart between poses.");
+         }
+         savedCalibration = pendingCalibration;
++        liveHand.reset(opencap::sensorRange(pendingCalibration));
+         communityCalibrationNeedsReset = true;
+         caliStat = UDCAP_V1_HAND_CALI_STAT_COMPLETED;
+         UdCapV1MCUPacket caliPacket {};
+@@ -1156,6 +1175,18 @@
+         if (joystickDeviceCalibration) sendCommand(1, CMD_JOYSTICK_V2_CALIBRATION, {3});
+         joystickCaliStat = UdCapV1JoystickCaliStat::UDCAP_V1_JOYSTICK_CALI_STAT_OK;
+     }
++}
++
++void UdCapV1Core::enableLiveHandCalibration(const std::string &serial) {
++    std::lock_guard guard(stateMutex);
++    if (udCapSerial == serial && udState == UD_INIT_STATE_LINKED) liveEnabled = true;
++}
++
++std::optional<opencap::SensorRange> UdCapV1Core::liveHandRange() const {
++    std::lock_guard guard(stateMutex);
++    if (!liveEnabled || udState != UD_INIT_STATE_LINKED || caliStat == UDCAP_V1_HAND_CALI_STAT_AUTO)
++        return std::nullopt;
++    return liveHand.range();
+ }
+ 
+ void UdCapV1Core::tryRestoreHandCalibration() {
+@@ -1368,6 +1399,24 @@
+     return handResponse;
+ }
+ 
++static std::optional<opencap::SensorRange> readLiveRange(const nlohmann::json &entry, const std::string &serial) {
++    if (serial.empty() || !entry.is_object() || !entry.contains("serial") || entry["serial"] != serial ||
++        !entry.contains("ends")) return std::nullopt;
++    const auto &ends = entry.at("ends");
++    opencap::SensorRange range{};
++    if (!ends.is_array() || ends.size() != range.size()) return std::nullopt;
++    for (std::size_t e = 0; e < range.size(); ++e) {
++        if (!ends[e].is_array() || ends[e].size() != range[e].size()) return std::nullopt;
++        for (std::size_t i = 0; i < range[e].size(); ++i) {
++            const auto &value = ends[e][i];
++            if (!value.is_number_integer() || value.get<double>() < INT16_MIN || value.get<double>() > INT16_MAX)
++                return std::nullopt;
++            range[e][i] = value.get<int16_t>();
++        }
++    }
++    return range;
++}
++
+ bool UdCapV1Core::loadPref() {
+     std::lock_guard guard(stateMutex);
+     std::filesystem::path dirPath = CorePref::getInstance().getPrefPath();
+@@ -1517,7 +1566,13 @@
+         if (udState == UD_INIT_STATE_LINKED && caliStat == UDCAP_V1_HAND_CALI_STAT_NONE &&
+             j.contains("handCalibration")) {
+             savedCalibration = readHandCalibration(j["handCalibration"], udCapSerial);
+-            if (savedCalibration) tryRestoreHandCalibration();
++            if (savedCalibration) {
++                liveHand.reset(opencap::sensorRange(*savedCalibration));
++                tryRestoreHandCalibration();
++            }
++        }
++        if (!liveEnabled && udState == UD_INIT_STATE_LINKED && j.contains("liveHandRange")) {
++            if (auto range = readLiveRange(j["liveHandRange"], udCapSerial)) liveHand.reset(*range);
+         }
+         return true;
+     } catch (const std::exception&) {
+@@ -1638,6 +1693,8 @@
+                                       {"balance", c.balance}, {"offset", c.offset}});
+     if (savedCalibration && !udCapSerial.empty())
+         j["handCalibration"] = {{"serial", udCapSerial}, {"poses", *savedCalibration}};
++    if (liveEnabled && !udCapSerial.empty())
++        j["liveHandRange"] = {{"serial", udCapSerial}, {"ends", liveHand.range()}};
+     outFile << j.dump(4); // Pretty print with 4 spaces
+     outFile.close();
+     return outFile.good();
