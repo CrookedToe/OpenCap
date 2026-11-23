@@ -132,7 +132,9 @@ try {
     Require (Test-Path (Join-Path $installed 'OpenCap.exe')) 'The desktop was not installed.'
     Require (Test-Path (Join-Path $installed 'OpenCapDashboard.exe')) 'The dashboard was not installed.'
     Require ((Read-Json $installedApp).applications[0].is_dashboard_overlay) 'Missing dashboard overlay declaration.'
-    Require (((Read-Json $env:VR_PATHREG_OVERRIDE).external_drivers -join '|') -eq "$otherDriver|$installedDriver") 'Wrong installed driver list.'
+    $expectedDrivers = "$otherDriver|$installedDriver"
+    $actualDrivers = (Read-Json $env:VR_PATHREG_OVERRIDE).external_drivers -join '|'
+    Require ($actualDrivers -eq $expectedDrivers) "Wrong installed driver list. Expected [$expectedDrivers]. Actual [$actualDrivers]."
     Require (((Read-Json $apps).manifest_paths -join '|') -eq "$sharedApp|$installedApp") 'Wrong installed dashboard list.'
     $active = Read-Json $settings
     Require ($active.driver_opencap.enable -and $active.driver_udcap.enable -eq $false -and $active.driver_udcap.skeleton_only) 'Incorrect installed driver settings.'
